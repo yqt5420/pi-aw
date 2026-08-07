@@ -3,6 +3,8 @@ import { Type } from "typebox";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, dirname, isAbsolute } from "node:path";
 import { homedir } from "node:os";
+import { randomInt } from "node:crypto";
+import { deflateSync } from "node:zlib";
 
 /**
  * vision-router — pi 视觉通道自动维护 + 路由扩展
@@ -10,7 +12,7 @@ import { homedir } from "node:os";
  * 核心能力：
  *  1. 自动扫描 pi 当前所有可用模型（ctx.modelRegistry.getAvailable()），
  *     记录每个模型的 input 声明（是否含 image）。
- *  2. 对模型做实际视觉验证（发 1x1 测试图），防止网关元数据不准确。
+ *  2. 对模型做图证实测（发含随机数字的大图，答对才算支持视觉），防止网关元数据不准确。
  *  3. 维护"可用视觉通道"列表，缓存到 ~/.pi/agent/vision-channels.json。
  *  4. 路由：主模型读图失败时，从维护列表选可识图模型兜底：
  *       同 provider 优先 → 其他视觉模型 → 外部免费 GLM/Agnes。
@@ -31,7 +33,7 @@ import { homedir } from "node:os";
 const STATE_FILE = join(homedir(), ".pi", "agent", "vision-channels.json");
 const REFRESH_INTERVAL_MS = 30 * 60 * 1000; // 30 分钟
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 缓存 24h 有效
-const TEST_TIMEOUT_MS = 15_000;
+const TEST_TIMEOUT_MS = 30_000;
 const ROUTE_TIMEOUT_MS = 30_000; // 正式路由每通道超时
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024; // 15MB 上限
 
@@ -46,10 +48,8 @@ const MIME_MAP: Record<string, string> = {
   ".bmp": "image/bmp",
 };
 
-/** 1x1 红色像素 PNG（base64），用于视觉能力验证 */
-const TEST_IMAGE_B64 =
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
-const TEST_PROMPT = "Reply with exactly the word 'vision-ok' if you can see this image.";
+/** 图证测试 prompt：要求模型读出图里的数字。数字本身不在 prompt 里，模型无法靠文本猜中。 */
+const VISION_TEST_PROMPT = "Read the number shown in the image. Reply with only the digits, nothing else.";
 
 /** 视觉不支持的关键词（用于 4xx 错误体判定） */
 const VISION_UNSUPPORTED_RE =
@@ -147,6 +147,82 @@ function withTimeout(
 // 模型视觉实测
 // ---------------------------------------------------------------------------
 
+// 图证测试图生成：渲染含随机数字的大尺寸 PNG（≥300px、高对比、四周留白）。
+// 数字不进任何 prompt，模型必须真正读图才能答对 —— 消除 prompt 泄密假阳与小图假阴。
+const DIGIT_FONT: Record<string, string[]> = {
+  "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+  "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
+  "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
+  "3": ["11111", "00010", "00100", "00010", "00001", "10001", "01110"],
+  "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
+  "5": ["11111", "10000", "11110", "00001", "00001", "10001", "01110"],
+  "6": ["00110", "01000", "10000", "11110", "10001", "10001", "01110"],
+  "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
+  "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
+  "9": ["01110", "10001", "10001", "01111", "00001", "00010", "01100"],
+};
+const FONT_SCALE = 24; // 每个字体像素放大 24×，保证 ≥50px、清晰可读
+const IMG_PAD = 20; // 四周留白
+
+function crc32(buf: Buffer): number {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c;
+  }
+  let c = ~0 >>> 0;
+  for (let i = 0; i < buf.length; i++) c = table[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (~c) >>> 0;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const typeBuf = Buffer.from(type, "ascii");
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])));
+  return Buffer.concat([len, typeBuf, data, crc]);
+}
+
+/** 生成含指定数字的 PNG（base64）。深字浅底、大尺寸，数字不写入任何 prompt。 */
+function makeNumberPng(num: number): string {
+  const s = String(num);
+  const digitsW = s.length * 5 * FONT_SCALE;
+  const digitsH = 7 * FONT_SCALE;
+  const W = digitsW + IMG_PAD * 2;
+  const H = digitsH + IMG_PAD * 2;
+  const raw: number[] = [];
+  for (let y = 0; y < H; y++) {
+    raw.push(0); // PNG scanline filter
+    for (let x = 0; x < W; x++) {
+      let on = false;
+      if (x >= IMG_PAD && x < IMG_PAD + digitsW && y >= IMG_PAD && y < IMG_PAD + digitsH) {
+        const lx = x - IMG_PAD;
+        const ly = y - IMG_PAD;
+        const di = Math.floor(lx / (5 * FONT_SCALE));
+        const fc = Math.floor(lx / FONT_SCALE) % 5;
+        const fr = Math.floor(ly / FONT_SCALE);
+        const glyph = DIGIT_FONT[s[di]];
+        on = !!glyph && !!glyph[fr] && glyph[fr][fc] === "1";
+      }
+      raw.push(on ? 20 : 235, on ? 20 : 235, on ? 20 : 235);
+    }
+  }
+  const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(W, 0);
+  ihdr.writeUInt32BE(H, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // color type: truecolor RGB
+  return Buffer.concat([
+    sig,
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", deflateSync(Buffer.from(raw))),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]).toString("base64");
+}
+
 async function testModelVision(
   model: { id: string; baseUrl: string },
   apiKey: string | undefined,
@@ -155,6 +231,8 @@ async function testModelVision(
 ): Promise<{ ok: boolean; unsupported: boolean; error?: string }> {
   const { signal: combined, clear } = withTimeout(signal, TEST_TIMEOUT_MS);
   try {
+    // 每次调用一个新随机数 → 模型无法靠猜/记忆过关
+    const num = randomInt(10000, 99999);
     const url = `${model.baseUrl.replace(/\/+$/, "")}/chat/completions`;
     const payload = {
       model: model.id,
@@ -162,12 +240,12 @@ async function testModelVision(
         {
           role: "user",
           content: [
-            { type: "image_url", image_url: { url: `data:image/png;base64,${TEST_IMAGE_B64}` } },
-            { type: "text", text: TEST_PROMPT },
+            { type: "image_url", image_url: { url: `data:image/png;base64,${makeNumberPng(num)}` } },
+            { type: "text", text: VISION_TEST_PROMPT },
           ],
         },
       ],
-      max_tokens: 32,
+      max_tokens: 400,
     };
 
     const hdrs: Record<string, string> = {
@@ -183,7 +261,7 @@ async function testModelVision(
       signal: combined,
     });
 
-    // 非 2xx：尝试解析错误体，区分「不支持视觉」vs「通道故障」
+    // 非 2xx：解析错误体，区分「不支持视觉」vs「通道故障」
     if (!resp.ok) {
       let errMsg = `HTTP ${resp.status} ${resp.statusText}`;
       let unsupported = false;
@@ -192,14 +270,13 @@ async function testModelVision(
         const detail = body.error?.message;
         if (detail) {
           errMsg = `${errMsg}: ${detail}`;
-          unsupported = VISION_UNSUPPORTED_RE.test(detail);
+          unsupported = VISION_UNSUPPORTED_RE.test(detail) || /image|vision|photo/i.test(detail);
         }
       } catch {
-        // 错误体不是 JSON，保留 status
+        /* 错误体不是 JSON */
       }
-      // 400/415 且错误信息提到 image → 视为不支持视觉
       if ((resp.status === 400 || resp.status === 415) && !unsupported) {
-        unsupported = VISION_UNSUPPORTED_RE.test(errMsg);
+        unsupported = /image|vision/i.test(errMsg);
       }
       return { ok: false, unsupported, error: errMsg.slice(0, 300) };
     }
@@ -213,9 +290,17 @@ async function testModelVision(
       return { ok: false, unsupported: VISION_UNSUPPORTED_RE.test(msg), error: msg.slice(0, 300) };
     }
     const content = data.choices?.[0]?.message?.content ?? "";
-    // 2xx 但正文明确拒绝图片 → 不支持
-    const failed = VISION_UNSUPPORTED_RE.test(content);
-    return { ok: !failed, unsupported: failed, error: failed ? content.slice(0, 300) : undefined };
+    // 图证判定：回复必须含该随机数字才算真识图（数字不在 prompt 里，猜不中）
+    if (content.includes(String(num))) return { ok: true };
+    // 2xx 但没读对 → 不支持视觉（接受了请求但读不了图，或直接拒绝）
+    const refused =
+      VISION_UNSUPPORTED_RE.test(content) ||
+      /cannot (see|read|process|view).*image|no image|unable to (see|process|view|access)/i.test(content);
+    return {
+      ok: false,
+      unsupported: true,
+      error: `${refused ? "(拒绝) " : "(未读对) "}${content.slice(0, 200)}`,
+    };
   } catch (err) {
     const name = err instanceof Error ? err.name : "";
     const msg = err instanceof Error ? err.message : String(err);
