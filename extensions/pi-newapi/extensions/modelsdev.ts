@@ -48,7 +48,6 @@ export interface ModelsDevMeta {
   maxTokens?: number;
   reasoning?: boolean;
   input?: ("text" | "image")[];
-  toolCall?: boolean;
   /** True for embedding / non-chat models — caller should skip registering them. */
   embedding?: boolean;
 }
@@ -192,7 +191,6 @@ export function lookupModel(modelName: string): ModelsDevMeta | undefined {
     maxTokens: typeof out === "number" && out > 0 ? out : undefined,
     reasoning: e.reasoning,
     input: input.length ? input : undefined,
-    toolCall: e.tool_call,
     embedding,
   };
 }

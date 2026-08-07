@@ -41,7 +41,7 @@ import {
   type ModelsDevMeta,
 } from "./modelsdev.ts";
 import { join } from "node:path";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 
 const PROVIDER_ID = "newapi";
 
@@ -76,7 +76,10 @@ function readConfigFile(): NewApiConfig | undefined {
 function writeConfigFile(patch: NewApiConfig): void {
   mkdirSync(agentDir(), { recursive: true });
   const merged = { ...(readConfigFile() ?? {}), ...patch };
-  writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2) + "\n", "utf-8");
+  // 原子写：tmp + rename，避免进程中断留下半截 JSON
+  const tmpPath = `${CONFIG_PATH}.tmp.${process.pid}.${Date.now()}`;
+  writeFileSync(tmpPath, JSON.stringify(merged, null, 2) + "\n", "utf-8");
+  renameSync(tmpPath, CONFIG_PATH);
   _cfg = merged;
   _cfgLoaded = true;
 }
@@ -148,7 +151,10 @@ function readCache(): CachedCatalog | undefined {
 function writeCache(c: CachedCatalog): void {
   try {
     mkdirSync(agentDir(), { recursive: true });
-    writeFileSync(CACHE_PATH, JSON.stringify(c, null, 2), "utf-8");
+    // 原子写：tmp + rename，避免进程中断留下半截缓存
+    const tmpPath = `${CACHE_PATH}.tmp.${process.pid}.${Date.now()}`;
+    writeFileSync(tmpPath, JSON.stringify(c, null, 2), "utf-8");
+    renameSync(tmpPath, CACHE_PATH);
   } catch {
     /* non-fatal */
   }
@@ -326,6 +332,8 @@ export default async function (pi: ExtensionAPI) {
   if (apiKey) process.env.NEWAPI_API_KEY = apiKey;
   let models: ReturnType<typeof buildModelConfig>[] = [];
   let fetchError: string | undefined;
+  // 记录每个模型是否由 models.dev 提供上下文窗口，供 /newapi-list 显示来源（避免重复 lookup）
+  const modelSource = new Map<string, boolean>();
 
   try {
     const catalog = await fetchCatalog(baseUrl);
@@ -335,7 +343,9 @@ export default async function (pi: ExtensionAPI) {
         const md = lookupModel(entry.model_name);
         // Skip embedding / non-chat models (e.g. gemini-embedding-*, dall-e, tts, …).
         if (md?.embedding || NON_CHAT.test(entry.model_name)) continue;
-        seen.set(entry.model_name, buildModelConfig(entry, catalog.groupRatio, md));
+        const cfg = buildModelConfig(entry, catalog.groupRatio, md);
+        modelSource.set(entry.model_name, !!md?.contextWindow);
+        seen.set(entry.model_name, cfg);
       }
       models = [...seen.values()];
     }
@@ -392,14 +402,13 @@ export default async function (pi: ExtensionAPI) {
       }
       const cols = ["模型", "上下文", "输出", "推理", "输入", "来源"];
       const rows = models.map((m) => {
-        const md = lookupModel(m.id);
         return [
           m.id,
           fmtTokens(m.contextWindow),
           fmtTokens(m.maxTokens),
           m.reasoning ? "✓" : "–",
           m.input && m.input.length ? m.input.join("/") : "—",
-          md?.contextWindow ? "models.dev" : "heuristic",
+          modelSource.get(m.id) ? "models.dev" : "heuristic",
         ] as string[];
       });
       const W = cols.map((h, i) =>
