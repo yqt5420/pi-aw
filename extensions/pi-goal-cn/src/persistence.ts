@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
@@ -254,7 +254,10 @@ export function clearLegacyPersistedGoal(cwd: string) {
 	const goals = readState();
 	delete goals[cwd];
 	mkdirSync(dirname(STATE_FILE), { recursive: true });
-	writeFileSync(STATE_FILE, `${JSON.stringify(goals, null, 2)}\n`);
+	// 原子写：tmp + rename，避免进程中断留下半截 JSON
+	const tmpPath = `${STATE_FILE}.tmp.${process.pid}.${Date.now()}`;
+	writeFileSync(tmpPath, `${JSON.stringify(goals, null, 2)}\n`);
+	renameSync(tmpPath, STATE_FILE);
 }
 
 function readState(): Record<string, unknown> {

@@ -407,6 +407,8 @@ export class GoalRuntime {
 				this.clearBudgetWrapUp();
 				this.blockStaleGoalToolCalls();
 				abortCurrentTurn(ctx);
+				// 显式暂停应掩盖此前 safety_pause 遗留的原因，避免状态展示残留“达到自动工作上限”
+				goal = { ...goal, safetyPauseCause: undefined };
 				status = "paused";
 				break;
 			case "budget_limit":
