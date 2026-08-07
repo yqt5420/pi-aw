@@ -80,7 +80,7 @@ export default function (pi: ExtensionAPI) {
 		elapsedSec: number,
 		prefix: string,
 	): string {
-		const speed = tokenCount > 0 ? (tokenCount / elapsedSec).toFixed(1) : "0";
+		const speed = tokenCount > 0 ? (elapsedSec < 0.05 ? "..." : (tokenCount / elapsedSec).toFixed(1)) : "0";
 		const ttfb = hasFirstToken
 			? ` | 首 ${(firstTokenTime / 1000).toFixed(1)}s`
 			: "";
@@ -263,6 +263,10 @@ export default function (pi: ExtensionAPI) {
 			clearTimeout(subClearTimer);
 			subClearTimer = null;
 		}
+
+		// 重置子代理状态，避免上一个被中止（end 被跳过）的残留跨会话带入
+		subActive = false;
+		subLatestCtx = null;
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
@@ -285,6 +289,11 @@ export default function (pi: ExtensionAPI) {
 
 		if (!enabled) return;
 
+		// 防御：若上一轮异常未清掉 timer，先清再建，避免句柄泄漏
+		if (timer) {
+			clearInterval(timer);
+			timer = null;
+		}
 		timer = setInterval(() => updateStatus(), 200);
 
 		const theme = ctx.ui.theme;
@@ -393,7 +402,12 @@ export default function (pi: ExtensionAPI) {
 			theme.fg("accent", `⚡ 子代理${subAgentLabel(agents)} 启动中...`),
 		);
 
-		// 心跳刷新：子代理思考/工具执行期间无 message_end 时保持显示
+		// 心跳刷新：子代理思考/工具执行期间无 message_end 时保持显示。
+		// 先清旧句柄再建，避免并发/嵌套子代理或在途残留把 interval 句柄覆盖泄漏。
+		if (subTimer) {
+			clearInterval(subTimer);
+			subTimer = null;
+		}
 		subTimer = setInterval(() => {
 			if (!subLatestCtx || !subActive) return;
 			subUpdateStreaming(subLatestCtx);
