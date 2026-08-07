@@ -1,0 +1,30 @@
+{
+  "name": "pi-aw",
+  "version": "0.1.0",
+  "description": "个人 pi (coding agent) 扩展与技能集合：extension + skill 一体 git package，跨设备同步用",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "pi",
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "dependencies": {
+    "@narumitw/pi-tui-kit": "^0.49.1",
+    "proper-lockfile": "^4.1.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}

@@ -1,0 +1,19 @@
+# 依赖（pi install git:... 后会自动 npm install）
+node_modules/
+package-lock.json
+
+# 本机配置/密钥（绝不进 git）
+*.local.json
+.env
+.env.*
+
+# skill 的虚拟环境（每台设备本机重建）
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# 构建产物
+*.tgz
+*.log
+.DS_Store
