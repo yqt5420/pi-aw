@@ -43,10 +43,13 @@ export async function performRecall(opts: RecallOptions): Promise<RecallResult> 
   const { client, sessionId, query, maxResults, includePersona, includeSceneNav, cache } = opts;
 
   const cached = cache.get(sessionId);
+  // 命中判定按当前开关所需数据是否已缓存，而非固定要求 persona——
+  // 否则关闭 includePersona（只想要场景导航）时缓存永不命中，每轮重复拉 L3/L2。
   const hit =
     cached !== undefined &&
     Date.now() - cached.ts < L3L2_CACHE_TTL_MS &&
-    cached.persona !== undefined;
+    (!includePersona || cached.persona !== undefined) &&
+    (!includeSceneNav || cached.scenes !== undefined);
 
   let l1Items: SearchResultItem[] = [];
   let persona: string | null | undefined;

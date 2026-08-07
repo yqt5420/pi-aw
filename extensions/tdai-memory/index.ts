@@ -99,7 +99,7 @@ export function configPathLocal(): string {
  * 配置文件名用 tdai-memory.json（而非 config.json），避免与 .pi 下其他 config 混淆，
  * 且不会被 pi update 覆盖（不在包目录内）。 */
 export function configPathProject(): string {
-  if (!cachedProjectPath) {
+  if (cachedProjectPath === undefined) {
     const extDir = dirname(fileURLToPath(import.meta.url));
     // 仅当扩展位于项目级 .pi/npm 下时才查找项目配置；全局安装（在 agentDir 下）跳过，避免误判
     const normalizedExt = extDir.replace(/\\/g, "/");
@@ -172,7 +172,7 @@ function mergeConfig(file: Record<string, unknown> | undefined): TdaiConfig {
       enabled: (capture.enabled as boolean) ?? DEFAULT_CONFIG.capture.enabled,
     },
     wiki: {
-      enabled: (((wiki as Record<string, unknown>)?.enabled) as boolean) ?? DEFAULT_CONFIG.wiki.enabled,
+      enabled: (wiki.enabled as boolean) ?? DEFAULT_CONFIG.wiki.enabled,
     },
   };
 }
@@ -981,6 +981,57 @@ export default async function tdaiMemoryExtension(pi: ExtensionAPI): Promise<voi
 
   if (needsSetup) return;
 
+  // -------------------------------------------------------------------------
+  // 项目级 agent 隔离：projectAgent=true 时按 cwd 维护独立 agent，防跨项目记忆串台
+  // -------------------------------------------------------------------------
+  /** cwd → 在途解析 promise（并发单飞，避免同一 cwd 重复创建/重复 list） */
+  const resolvingProjectAgent = new Map<string, Promise<string | undefined>>();
+
+  /**
+   * 解析当前工作目录对应的 agentId：
+   * - projectAgent=false：直接用 fixedAgentId（全局，保持旧行为）
+   * - projectAgent=true：按 cwd 推导/复用项目 agent（带 cwd TTL 缓存 + 并发单飞）；
+   *   解析失败时回退 fixedAgentId，后端恢复后下个会话自动重试。
+   */
+  async function resolveAgentId(cwd: string): Promise<string | undefined> {
+    if (!config.projectAgent) return config.fixedAgentId || undefined;
+
+    const entry = cwdAgentId.get(cwd);
+    if (entry && Date.now() - entry.ts < CWD_AGENT_TTL_MS) return entry.agentId;
+    if (entry) cwdAgentId.delete(cwd);
+
+    const inFlight = resolvingProjectAgent.get(cwd);
+    if (inFlight) return inFlight;
+
+    const p = (async () => {
+      try {
+        // 短超时避免后端不可达时卡住会话；migrateLegacy=false：新名含 cwd 哈希，
+        // 不复用旧版无哈希 agent，避免不同项目同 basename 串台
+        const client = baseClient(5000);
+        const agent = await client.resolveProjectAgent(cwd, false);
+        if (agent) {
+          cwdAgentId.set(cwd, { agentId: agent.agent_id, ts: Date.now() });
+          return agent.agent_id;
+        }
+      } catch (error) {
+        log.warn(`[tdai-memory] 项目 agent 解析失败，回退 fixedAgentId: ${errorMsg(error)}`);
+      }
+      return config.fixedAgentId || undefined;
+    })();
+
+    void p.finally(() => {
+      if (resolvingProjectAgent.get(cwd) === p) resolvingProjectAgent.delete(cwd);
+    });
+    resolvingProjectAgent.set(cwd, p);
+    return p;
+  }
+
+  pi.on("session_start", async (_e, ctx) => {
+    const sessionId = ctx.sessionManager.getSessionId();
+    const agentId = await resolveAgentId(ctx.cwd);
+    if (agentId) sessionAgentId.set(sessionId, agentId);
+  });
+
   // 注册工具：wiki 工具（tdai_wiki_*）仅当 config.wiki.enabled=true 时注册（实验中，默认关闭）
   const isWikiTool = (name: string) => name.startsWith("tdai_wiki_");
   for (const tool of tdaiTools) {
@@ -1028,14 +1079,15 @@ export default async function tdaiMemoryExtension(pi: ExtensionAPI): Promise<voi
   // agent_end：捕获本回合写 L0（fire-and-forget，不 await）
   // -------------------------------------------------------------------------
   pi.on("agent_end", (event, ctx) => {
+    const sessionId = ctx.sessionManager.getSessionId();
+    // 立即删 pendingPrompt（无论 capture 是否启用，避免禁用时每轮累积泄漏）
+    const pending = pendingPrompt.get(sessionId);
+    pendingPrompt.delete(sessionId);
+
     if (!config.capture.enabled) return;
     const messages = event.messages ?? [];
     if (messages.length === 0) return;
 
-    const sessionId = ctx.sessionManager.getSessionId();
-    // 立即删 pendingPrompt（防下轮 before_agent_start 覆盖竞态）
-    const pending = pendingPrompt.get(sessionId);
-    pendingPrompt.delete(sessionId);
     // 新鲜度校验：仅当 prompt 是本轮（10 分钟内）缓存的才用于污染替换，防跨轮误用
     const originalUserText =
       pending && Date.now() - pending.ts < PENDING_PROMPT_TTL_MS ? pending.text : undefined;

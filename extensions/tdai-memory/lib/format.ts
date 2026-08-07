@@ -50,8 +50,6 @@ function formatSceneLine(entry: ScenarioEntry): string {
 export interface SystemContextResult {
   /** 追加到 systemPrompt 的上下文块（L3 + L2 + 工具指南）。 */
   systemContext?: string;
-  /** 作为消息注入的 L1 动态记忆块。 */
-  prependContext?: string;
   /** L3 画像原文（供调用方缓存）。 */
   personaContent: string | null;
   /** L2 场景条目（供调用方缓存）。 */
@@ -86,5 +84,5 @@ export function formatSystemContext(
   }
 
   const systemContext = parts.length > 0 ? parts.join("\n\n") : undefined;
-  return { systemContext, prependContext: undefined, personaContent, sceneEntries };
+  return { systemContext, personaContent, sceneEntries };
 }
