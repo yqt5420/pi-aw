@@ -49,13 +49,19 @@ export interface ResolvedCost {
 
 const BASE_USD_PER_M = 2.0; // $2 / 1M input tokens baseline
 
+/** 可选兜底：固定按次模型无法按 token 计价时，用它提供的 $/M 近似。 */
 export function resolveCost(
   entry: NewApiPricingEntry,
   groupRatio: number,
+  fallback?: ResolvedCost,
 ): ResolvedCost {
-  // Fixed-price-per-call models: cost-per-token is effectively 0 for tracking.
+  // Fixed-price-per-call models: cost-per-token isn't published. Use a
+  // curated per-M fallback (pi built-in) when available; otherwise a 0 cost
+  // (better than pretending we know a per-token number).
   if (entry.model_price && entry.model_price > 0) {
-    return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    return fallback
+      ? { ...fallback }
+      : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   }
   const input = entry.model_ratio * groupRatio * BASE_USD_PER_M;
   const output = input * (entry.completion_ratio ?? 1);
@@ -66,12 +72,19 @@ export function resolveCost(
   return { input, output, cacheRead, cacheWrite };
 }
 
-/** Pick the group ratio to apply. Prefer "default", else first available. */
+/**
+ * Pick the group ratio to apply. Prefer "default"; otherwise, since the API
+ * key's real group is unknown without auth, take the most conservative
+ * (max) ratio so cost tracking never under-reports.
+ */
 export function pickGroupRatio(
   pricing: NewApiPricingResponse,
 ): number {
   const groups = pricing.group_ratio ?? {};
+  const values = Object.values(groups).filter(
+    (v): v is number => typeof v === "number",
+  );
+  if (values.length === 0) return 1;
   if (typeof groups["default"] === "number") return groups["default"];
-  const first = Object.values(groups)[0];
-  return typeof first === "number" ? first : 1;
+  return Math.max(...values);
 }

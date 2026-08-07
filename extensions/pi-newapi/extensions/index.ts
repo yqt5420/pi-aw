@@ -16,11 +16,13 @@
  * built-in providers. If the network fetch fails, it falls back to the last
  * cached model list in `~/.pi/agent/newapi-models-cache.json`.
  *
- * Real context windows / max output / reasoning flags come from the
- * models.dev catalog (cached locally at ~/.pi/agent/modelsdev-cache.json;
- * refresh with /newapi-refresh-meta). The gateway's /api/pricing exposes no
- * context window at all, so models.dev is the source of truth; per-vendor
- * heuristics cover anything models.dev doesn't list.
+ * Context windows / max output / reasoning flags / thinking levels all come
+ * from pi's bundled built-in model catalog (see builtin.ts) — the same
+ * curated source pi uses for its own providers. The gateway's /api/pricing
+ * exposes no such metadata at all. builtin.ts normalizes gateway ids (strips
+ * `pool-` prefixes and dated/version codes like -0731) to hit the canonical
+ * model, so thinking levels show accurately. Anything pi's catalog doesn't
+ * know falls back to per-vendor heuristics (vendor-detect.ts).
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -29,21 +31,19 @@ import type { Api } from "@earendil-works/pi-ai";
 import { detectVendor, vendorDefaults } from "./vendor-detect.ts";
 import { resolveCost, pickGroupRatio } from "./pricing.ts";
 import type { NewApiPricingResponse, NewApiPricingEntry } from "./pricing.ts";
-import {
-  lookupModel,
-  refreshModelsDev,
-  cachePath,
-  cacheExists,
-  snapshotPath,
-  activeCatalogSource,
-  agentDir,
-  resolveProxy as resolveMetadataProxy,
-  type ModelsDevMeta,
-} from "./modelsdev.ts";
+import { lookupBuiltin, type BuiltinMeta } from "./builtin.ts";
 import { join } from "node:path";
+import { homedir } from "node:os";
+
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 
 const PROVIDER_ID = "newapi";
+
+/** Resolve the pi agent config directory, honoring PI_CODING_AGENT_DIR override. */
+function agentDir(): string {
+  if (process.env.PI_CODING_AGENT_DIR) return process.env.PI_CODING_AGENT_DIR;
+  return join(homedir(), ".pi", "agent");
+}
 
 const CACHE_PATH = join(agentDir(), "newapi-models-cache.json");
 const CONFIG_PATH = join(agentDir(), "newapi-config.json");
@@ -163,24 +163,28 @@ function writeCache(c: CachedCatalog): void {
 /** Name patterns for non-chat models we should not register (image / audio / embedding generators). */
 const NON_CHAT = /embedding|dall-?e|\btts\b|\bwhisper\b|suno|stable-?diffusion|midjourney|imagen|bge-|e5-|rerank|moderation/i;
 
-/** Build a pi ProviderModelConfig from a pricing entry + models.dev metadata. */
+/** Build a pi ProviderModelConfig from a pricing entry + pi built-in metadata. */
 function buildModelConfig(
   entry: NewApiPricingEntry,
   groupRatio: number,
-  md: ModelsDevMeta | undefined,
+  bi: BuiltinMeta | undefined,
 ) {
   const id = entry.model_name;
   const vc = detectVendor(id);
   const defs = vendorDefaults(vc.vendor);
 
-  // Precedence: models.dev catalog > vendor heuristic.
-  const reasoning = md?.reasoning ?? vc.reasoning;
-  const contextWindow = md?.contextWindow ?? defs.contextWindow;
-  const maxTokens = md?.maxTokens ?? defs.maxTokens;
-  const input = md?.input ?? defs.input;
+  // 字段级来源优先级：pi 内置目录（策展）> vendor 启发式（兜底）。
+  const reasoning = bi?.reasoning ?? vc.reasoning;
+  const contextWindow = bi?.contextWindow ?? defs.contextWindow;
+  const maxTokens = bi?.maxTokens ?? defs.maxTokens;
+  const input = bi?.input ?? defs.input;
+  // 思考强度（thinkingLevelMap）仅由 pi 内置目录提供。
+  const thinkingLevelMap = bi?.thinkingLevelMap;
 
-  const cost = resolveCost(entry, groupRatio);
+  // 计费用网关 ratio；固定按次模型（model_price>0）用内置 $/M 近似兜底，避免记成 0。
+  const cost = resolveCost(entry, groupRatio, bi?.cost);
 
+  // 兼容参数：先填 vendor 启发式的口径，再让 pi 内置目录（若命中）覆盖为策展值。
   const compat: Record<string, unknown> = {};
   if (vc.thinkingFormat) compat.thinkingFormat = vc.thinkingFormat;
   if (vc.requiresReasoningContentOnAssistantMessages)
@@ -188,15 +192,17 @@ function buildModelConfig(
   if (vc.supportsReasoningEffort !== undefined)
     compat.supportsReasoningEffort = vc.supportsReasoningEffort;
   if (vc.maxTokensField) compat.maxTokensField = vc.maxTokensField;
+  if (bi?.compat) Object.assign(compat, bi.compat);
 
   return {
     id,
-    name: id,
+    name: bi?.name ?? id,
     reasoning,
     input,
     cost,
     contextWindow,
     maxTokens,
+    ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
     ...(Object.keys(compat).length ? { compat } : {}),
   };
 }
@@ -267,6 +273,25 @@ function fmtTokens(n: number | undefined): string {
   return typeof n === "number" ? n.toLocaleString("en-US") : "—";
 }
 
+/** Build all model configs from a pricing catalog, dedup by id (first wins). */
+function buildModels(
+  entries: NewApiPricingEntry[],
+  groupRatio: number,
+  source: Map<string, string>,
+): ReturnType<typeof buildModelConfig>[] {
+  const seen = new Map<string, ReturnType<typeof buildModelConfig>>();
+  for (const entry of entries) {
+    // Skip embedding / non-chat models (e.g. gemini-embedding-*, dall-e, tts, …).
+    if (NON_CHAT.test(entry.model_name)) continue;
+    const bi = lookupBuiltin(entry.model_name);
+    const cfg = buildModelConfig(entry, groupRatio, bi);
+    source.set(entry.model_name, bi ? "builtin" : "heuristic");
+    // 同一 id 在 /api/pricing 里可能因 endpoint 类型不同出现多条——保留第一条。
+    if (!seen.has(entry.model_name)) seen.set(entry.model_name, cfg);
+  }
+  return [...seen.values()];
+}
+
 export default async function (pi: ExtensionAPI) {
   // Commands are registered first so they work regardless of whether a base
   // URL is currently configured (lets the user bootstrap from nothing).
@@ -319,7 +344,7 @@ export default async function (pi: ExtensionAPI) {
     pi.on("session_start", (_e, ctx) => {
       ctx.ui.notify(
         "newapi：未配置 — 请创建 ~/.pi/agent/newapi-config.json，写入 {\"baseUrl\":\"https://你的网关/v1\",\"apiKey\":\"sk-...\"}，或设置环境变量 NEWAPI_BASE_URL / NEWAPI_API_KEY，然后 /reload",
-        "warn",
+        "warning",
       );
     });
     return;
@@ -330,74 +355,50 @@ export default async function (pi: ExtensionAPI) {
   // auth resolves it, and so /login newapi can bind (it stores into NEWAPI_API_KEY).
   // Both config-file literal and env var flow through this single env hook.
   if (apiKey) process.env.NEWAPI_API_KEY = apiKey;
-  let models: ReturnType<typeof buildModelConfig>[] = [];
+
+  // 记录每个模型的能力元数据来源（builtin / heuristic），供 /newapi-list 显示（避免重复 lookup）。
+  const modelSource = new Map<string, string>();
+
+  // ① 先用手头缓存同步出模型列表并立即注册——启动绝不阻塞在网络请求上。
+  const cached = readCache();
+  let models: ReturnType<typeof buildModelConfig>[] =
+    cached && cached.baseUrl === baseUrl ? buildModels(cached.entries, cached.groupRatio, modelSource) : [];
   let fetchError: string | undefined;
-  // 记录每个模型是否由 models.dev 提供上下文窗口，供 /newapi-list 显示来源（避免重复 lookup）
-  const modelSource = new Map<string, boolean>();
 
-  try {
-    const catalog = await fetchCatalog(baseUrl);
-    if (catalog) {
-      const seen = new Map<string, ReturnType<typeof buildModelConfig>>();
-      for (const entry of catalog.entries) {
-        const md = lookupModel(entry.model_name);
-        // Skip embedding / non-chat models (e.g. gemini-embedding-*, dall-e, tts, …).
-        if (md?.embedding || NON_CHAT.test(entry.model_name)) continue;
-        const cfg = buildModelConfig(entry, catalog.groupRatio, md);
-        modelSource.set(entry.model_name, !!md?.contextWindow);
-        seen.set(entry.model_name, cfg);
-      }
-      models = [...seen.values()];
-    }
-  } catch (err) {
-    fetchError = err instanceof Error ? err.message : String(err);
-  }
-
-  const providerConfig: Parameters<typeof pi.registerProvider>[1] = {
+  const providerConfig = (): Parameters<typeof pi.registerProvider>[1] => ({
     name: "NewAPI Gateway",
     baseUrl,
     api: "openai-completions" as Api,
     apiKey: "$NEWAPI_API_KEY", // env reference → /login newapi binds; value injected above
     authHeader: true, // OpenAI-compatible: Authorization: Bearer <key>
     models,
+  });
+
+  pi.registerProvider(PROVIDER_ID, providerConfig());
+
+  // 共享的刷新逻辑：拉取目录 → 用最新结果替换注册。启动与 /newapi-refresh 都复用它。
+  const refreshCatalog = async (): Promise<void> => {
+    try {
+      const catalog = await fetchCatalog(baseUrl);
+      if (catalog) {
+        modelSource.clear();
+        models = buildModels(catalog.entries, catalog.groupRatio, modelSource);
+        pi.registerProvider(PROVIDER_ID, providerConfig());
+      }
+    } catch (err) {
+      fetchError = err instanceof Error ? err.message : String(err);
+      throw err; // 让调用方决定是否上报
+    }
   };
 
-  pi.registerProvider(PROVIDER_ID, providerConfig);
-
-  pi.registerCommand("newapi-refresh-meta", {
-    description:
-      "通过 curl 重新拉取 models.dev 元数据（真实上下文窗口 / 最大输出）。可选代理参数：/newapi-refresh-meta http://127.0.0.1:12080",
-    async handler(args, ctx) {
-      const proxy = args.trim() || resolveMetadataProxy() || "";
-      ctx.ui.notify(
-        `newapi：正在刷新 models.dev 元数据${proxy ? `（代理 ${proxy}）` : "（直连）"}…`,
-        "info",
-      );
-      const r = await refreshModelsDev(proxy || undefined);
-      if (r.ok) {
-        ctx.ui.notify(`newapi：models.dev 已刷新（${r.count} 个模型），重新加载…`, "info");
-        try {
-          await ctx.reload();
-        } catch (err) {
-          ctx.ui.notify(
-            `newapi：已刷新但重新加载失败 — 请重启 pi。（${err instanceof Error ? err.message : String(err)}）`,
-            "warning",
-          );
-        }
-      } else {
-        ctx.ui.notify(
-          `newapi：models.dev 刷新失败 — ${r.error}。可尝试 /newapi-refresh-meta http://host:port`,
-          "error",
-        );
-      }
-    },
-  });
+  // ② 后台异步执行一次刷新（启动不阻塞；失败静默，留给 session_start 报）。
+  void refreshCatalog().catch(() => {});
 
   pi.registerCommand("newapi-list", {
     description: "列出已发现的 NewAPI 模型，含上下文窗口、最大输出、推理能力及元数据来源。",
     async handler(_args, ctx) {
       if (!models.length) {
-        ctx.ui.notify("newapi：暂无模型 — 请先用 /newapi-url 设置网关地址", "warn");
+        ctx.ui.notify("newapi：暂无模型 — 请先用 /newapi-url 设置网关地址", "warning");
         return;
       }
       const cols = ["模型", "上下文", "输出", "推理", "输入", "来源"];
@@ -408,7 +409,7 @@ export default async function (pi: ExtensionAPI) {
           fmtTokens(m.maxTokens),
           m.reasoning ? "✓" : "–",
           m.input && m.input.length ? m.input.join("/") : "—",
-          modelSource.get(m.id) ? "models.dev" : "heuristic",
+          modelSource.get(m.id) ?? "heuristic",
         ] as string[];
       });
       const W = cols.map((h, i) =>
@@ -416,22 +417,29 @@ export default async function (pi: ExtensionAPI) {
       );
       const line = (cells: string[]) =>
         cells.map((c, i) => padEndDisplay(c, W[i])).join("  ");
-      const srcLabel =
-        activeCatalogSource() === "cache"
-          ? "agent 缓存"
-          : activeCatalogSource() === "snapshot"
-            ? "随包快照"
-            : "启发式";
       const lines: string[] = [];
-      lines.push(`NewAPI 模型（共 ${models.length} 个）   元数据来源：${srcLabel}`);
+      lines.push(`NewAPI 模型（共 ${models.length} 个）`);
       lines.push("");
       lines.push(line(cols));
       lines.push("─".repeat(dispWidth(line(cols))));
       for (const r of rows) lines.push(line(r));
-      lines.push("");
-      lines.push(`缓存：${cachePath()}（${cacheExists() ? "已存在" : "不存在"}）`);
-      lines.push(`快照：${snapshotPath()}`);
       ctx.ui.notify(lines.join("\n"), "info");
+    },
+  });
+
+  pi.registerCommand("newapi-refresh", {
+    description: "立即重新拉取 NewAPI 模型目录（无需 /reload / 重启）。",
+    async handler(_args, ctx) {
+      ctx.ui.notify("newapi：正在刷新模型目录…", "info");
+      try {
+        await refreshCatalog();
+        ctx.ui.notify(`newapi：已刷新，共 ${models.length} 个模型`, "info");
+      } catch (err) {
+        ctx.ui.notify(
+          `newapi：刷新失败 — ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        );
+      }
     },
   });
 
@@ -440,10 +448,13 @@ export default async function (pi: ExtensionAPI) {
       ctx.ui.notify(`newapi：模型发现失败 — ${fetchError}`, "error");
       return;
     }
-    if (!apiKey) {
+    // 真正的"有无 key"以 pi 的鉴权状态为准：/login 存入的 CredentialStore（auth.json）也算已配置。
+    const configured = ctx.modelRegistry?.getProviderAuthStatus?.(PROVIDER_ID)?.configured === true;
+    const hasKey = !!apiKey || configured;
+    if (!hasKey) {
       ctx.ui.notify(
         "newapi：未设置 API key — 请在 ~/.pi/agent/newapi-config.json 里设 apiKey，或运行 /login newapi",
-        "warn",
+        "warning",
       );
     } else if (models.length > 0) {
       ctx.ui.notify(`newapi：${models.length} 个模型可用`, "info");

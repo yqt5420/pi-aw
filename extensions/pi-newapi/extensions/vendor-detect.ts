@@ -100,6 +100,18 @@ const RULES: Rule[] = [
     input: ["text", "image"],
   },
   // --- Kimi / Moonshot (k2.x non-reasoning; newer reasoning variants exist) ---
+  // --- Kimi / Moonshot 推理变体（k2-thinking 等）先于普通 kimi 规则匹配 ---
+  {
+    match: /(?:kimi|moonshot).*(?:thinking|reason|r1)/i,
+    vendor: "moonshot",
+    reasoning: true,
+    thinkingFormat: "openai",
+    maxTokensField: "max_tokens",
+    contextWindow: 131072,
+    maxTokens: 8192,
+    input: ["text"],
+  },
+  // --- Kimi / Moonshot （k2.x 非推理）— 推理变体见上方专属规则 ---
   {
     match: /kimi|moonshot/i,
     vendor: "moonshot",
