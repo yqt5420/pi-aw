@@ -189,6 +189,8 @@ function buildModelConfig(
   if (vc.thinkingFormat) compat.thinkingFormat = vc.thinkingFormat;
   if (vc.requiresReasoningContentOnAssistantMessages)
     compat.requiresReasoningContentOnAssistantMessages = true;
+  if (vc.requiresAssistantAfterToolResult)
+    compat.requiresAssistantAfterToolResult = true;
   if (vc.supportsReasoningEffort !== undefined)
     compat.supportsReasoningEffort = vc.supportsReasoningEffort;
   if (vc.maxTokensField) compat.maxTokensField = vc.maxTokensField;

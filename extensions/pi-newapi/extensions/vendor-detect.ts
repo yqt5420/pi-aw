@@ -34,6 +34,8 @@ export interface VendorCompat {
   thinkingFormat?: ThinkingFormat;
   /** True for deepseek upstream: forces empty reasoning_content on history. */
   requiresReasoningContentOnAssistantMessages?: boolean;
+  /** Insert an assistant message before a user message after tool results. */
+  requiresAssistantAfterToolResult?: boolean;
   /** Some upstreams reject reasoning_effort; set false to suppress it. */
   supportsReasoningEffort?: boolean;
   /** Some upstreams only understand max_tokens (not max_completion_tokens). */
@@ -47,6 +49,7 @@ interface Rule {
   reasoning: boolean;
   thinkingFormat?: ThinkingFormat;
   requiresReasoningContentOnAssistantMessages?: boolean;
+  requiresAssistantAfterToolResult?: boolean;
   supportsReasoningEffort?: boolean;
   maxTokensField?: "max_tokens" | "max_completion_tokens";
   /** Default context window hint, used when pricing API gives nothing. */
@@ -72,6 +75,7 @@ const RULES: Rule[] = [
     reasoning: true,
     thinkingFormat: "deepseek",
     requiresReasoningContentOnAssistantMessages: true,
+    requiresAssistantAfterToolResult: true,
     supportsReasoningEffort: true,
     contextWindow: 64000,
     maxTokens: 8192,
@@ -84,6 +88,7 @@ const RULES: Rule[] = [
     reasoning: true,
     thinkingFormat: "qwen",
     supportsReasoningEffort: true,
+    requiresAssistantAfterToolResult: true,
     contextWindow: 131072,
     maxTokens: 8192,
     input: ["text", "image"],
@@ -95,6 +100,7 @@ const RULES: Rule[] = [
     reasoning: true,
     thinkingFormat: "qwen",
     supportsReasoningEffort: true,
+    requiresAssistantAfterToolResult: true,
     contextWindow: 131072,
     maxTokens: 8192,
     input: ["text", "image"],
@@ -107,6 +113,7 @@ const RULES: Rule[] = [
     reasoning: true,
     thinkingFormat: "openai",
     maxTokensField: "max_tokens",
+    requiresAssistantAfterToolResult: true,
     contextWindow: 131072,
     maxTokens: 8192,
     input: ["text"],
@@ -160,6 +167,7 @@ const RULES: Rule[] = [
     reasoning: true,
     thinkingFormat: "deepseek",
     requiresReasoningContentOnAssistantMessages: true,
+    requiresAssistantAfterToolResult: true,
     supportsReasoningEffort: false,
     contextWindow: 1000000,
     maxTokens: 8192,
@@ -171,6 +179,7 @@ const RULES: Rule[] = [
     vendor: "doubao",
     reasoning: false,
     thinkingFormat: "openai",
+    requiresAssistantAfterToolResult: true,
     contextWindow: 131072,
     maxTokens: 8192,
     input: ["text"],
@@ -182,6 +191,7 @@ const RULES: Rule[] = [
     reasoning: true,
     thinkingFormat: "openai",
     supportsReasoningEffort: true,
+    requiresAssistantAfterToolResult: true,
     contextWindow: 64000,
     maxTokens: 8192,
     input: ["text"],
@@ -207,6 +217,7 @@ export function detectVendor(id: string): VendorCompat {
         thinkingFormat: rule.thinkingFormat,
         requiresReasoningContentOnAssistantMessages:
           rule.requiresReasoningContentOnAssistantMessages,
+        requiresAssistantAfterToolResult: rule.requiresAssistantAfterToolResult,
         supportsReasoningEffort: rule.supportsReasoningEffort,
         maxTokensField: rule.maxTokensField,
       };

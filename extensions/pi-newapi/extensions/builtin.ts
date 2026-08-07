@@ -129,11 +129,22 @@ export function lookupBuiltin(modelId: string): BuiltinMeta | undefined {
   const base = normalize(modelId);
   if (!base) return undefined;
   const lookup = getLookup();
-  const hit = lookup.get(base);
-  if (hit) return hit;
+  const exact = lookup.get(base);
+  // 精确命中且已带思考档位 → 直接用（最具体，信息也够）。
+  if (exact?.thinkingLevelMap) return exact;
+  // 否则继续剥掉 pool-、临时代号（-0731 / -latest 等）命中基础模型。
+  // 注意：像 vercel-ai-gateway 这类代理厂商会用“带日期的 id”精确命中（例如
+  // deepseek-v4-flash-0731）但自身不带 thinkingLevelMap，会挡在生产厂商那条
+  // 带档位的记录前面——因此这里优先反向取“更富”（含 thinkingLevelMap）的命中。
+  let best = exact;
   for (const cand of strippedCandidates(base)) {
     const c = lookup.get(cand);
-    if (c) return c;
+    if (!c) continue;
+    if (!best) {
+      best = c;
+      continue;
+    }
+    if (c.thinkingLevelMap && !best.thinkingLevelMap) best = c;
   }
-  return undefined;
+  return best;
 }
