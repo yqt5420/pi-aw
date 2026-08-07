@@ -36,7 +36,7 @@ export interface SafeSubcommands {
 export const SAFE_BUILTIN_PLAN_TOOLS = new Set(["read", "bash", "grep", "find", "ls"]);
 export type PlanModeToolPolicy = "read-only" | "limited" | "user-opt-in" | "blocked";
 
-const BLOCKED_BUILTIN_TOOLS = new Set(["edit", "write"]);
+export const BLOCKED_BUILTIN_TOOLS = new Set(["edit", "write"]);
 const MUTATING_COMMANDS = new Set([
 	"rm",
 	"rmdir",

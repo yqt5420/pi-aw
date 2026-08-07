@@ -56,6 +56,7 @@ import {
 } from "./settings.js";
 import { type PlanCompletionSource, type PlanModeState, restorePlanModeState } from "./state.js";
 import {
+	BLOCKED_BUILTIN_TOOLS,
 	canSelectToolInPlanMode,
 	classifyPlanModeTool,
 	findBlockedCommandSegment,
@@ -71,7 +72,6 @@ import {
 
 const STATE_ENTRY_TYPE = "plan-mode-state";
 const PROPOSED_PLAN_MESSAGE_TYPE = "proposed-plan";
-const BLOCKED_BUILTIN_TOOLS = new Set(["edit", "write"]);
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write"];
 interface ReadyPresentationIntent {
 	nonce: number;
@@ -478,6 +478,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
 
 		readyPresentationIntent = undefined;
+		let shown = false;
 		try {
 			if (intent.source === "legacy_proposed_plan") {
 				pi.sendMessage(
@@ -491,9 +492,16 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			}
 			if (ctx.hasUI && completedPlanIsCurrent(intent)) {
 				await planActions.showReady(latestCommandContext ?? ctx);
+				shown = true;
 			}
 		} catch (error: unknown) {
-			if (!isStaleExtensionContextError(error)) throw error;
+			if (isStaleExtensionContextError(error)) return;
+			// 展示失败：日志而非抛出（避免 onAgentSettled 顶层未捕获拒绝）；
+			// 若计划尚未真正展示，恢复 intent 以便下次 settle 重试
+			console.error(
+				`[plan-mode] 展示 ready 计划失败：${error instanceof Error ? error.message : String(error)}`,
+			);
+			if (!shown && readyPresentationIntent === undefined) readyPresentationIntent = intent;
 		}
 	});
 
