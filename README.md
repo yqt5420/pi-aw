@@ -38,7 +38,7 @@ pi 会：
 1. clone 到 `~/.pi/agent/git/github.com/yqt5420/pi-aw`
 2. 跑 `npm install` 装好运行时依赖（`@narumitw/pi-tui-kit` 等）
 3. 把这行写进 `~/.pi/agent/settings.json` 的 `packages` 数组
-4. 加载 `extensions/` 下 7 个 extension + `skills/` 下 2 个 skill
+4. 加载 `extensions/` 下 7 个 extension + `skills/` 下 2 个 skill + `prompts/` 下的提示词模板
 
 装完重启 pi 即生效。**这套设备的 settings 不用手改。**
 
@@ -135,6 +135,55 @@ tdai-memory / pi-newapi 各有本机 json，**不进 git**（`.gitignore` 已排
 
 tdai-memory 支持 `{项目根}/.pi/tdai-memory.json`，只对该项目生效，可提交团队共享或本机独占。
 
+## 提示词模板（prompt templates）
+
+`prompts/` 里的 `.md` 文件会注册成 `/名字` 命令，在 pi 编辑器敲 `/` 触发自动补全。
+
+内置示例：`prompts/review.md` → 敲 `/review` 展开成代码审查提示词。
+
+### 格式
+
+```markdown
+---
+description: 审查暂存的 git 改动
+argument-hint: "<范围>"
+---
+审查 `git diff --cached` 的改动，重点关注：
+1. Bug 与逻辑错误
+2. 安全问题
+3. 错误处理
+```
+
+- 文件名（去 `.md`）即命令名：`review.md` → `/review`
+- `description` 可选，显示在补全列表
+- `argument-hint` 可选，显示参数提示
+- 支持 `$1` `$@` `${1:-默认值}` 参数插值
+
+### 调用
+
+```
+/review                      # 无参数
+/commit fix auth            # $1=fix, $2=auth
+/component Button "onClick" # $1=Button, $@=onClick
+```
+
+### 按设备裁剪提示词
+
+和 extension/skill 一样，settings 里用对象形式过滤：
+
+```json
+{
+  "packages": [
+    {
+      "source": "git:github.com/yqt5420/pi-aw@main",
+      "prompts": ["prompts/review.md"]
+    }
+  ]
+}
+```
+
+`prompts: []` 表示一个模板都不加载。详见 [pi prompt-templates 文档](https://github.com/earendil-works/pi-coding-agent)。
+
 ## procmem-scanner 的虚拟环境（Windows 专用）
 
 `.venv` 不进 git，每台 Windows 设备首次使用前在 skill 目录重建：
@@ -161,9 +210,12 @@ pi-aw/
 │   ├── pi-plan-mode-cn/{ src/, scripts/, zh-cn.json, package.json }
 │   ├── pi-subagents-cn/{ src/, scripts/, zh-cn.json, package.json }
 │   └── pi-goal-cn/{ src/, scripts/, zh-cn.json, package.json }
-└── skills/                   # 2 个 skill
-    ├── agent-reach/{ SKILL.md, references/ }
-    └── procmem-scanner/{ SKILL.md, procmem_scanner.py, requirements.txt }
+├── skills/                   # 2 个 skill
+│   ├── agent-reach/{ SKILL.md, references/ }
+│   └── procmem-scanner/{ SKILL.md, procmem_scanner.py, requirements.txt }
+└── prompts/                  # 提示词模板（.md 文件 → /名字 命令）
+    ├── README.md             # 模板说明
+    └── review.md             # 示例：/review
 ```
 
 每个 extension 子目录的 `package.json` 只含 `pi.extensions` 指向入口文件（不是独立 npm 包，无 name/version/dependencies）——这样 pi 加载时按各自入口精确加载，文件名/结构不用改。
@@ -189,6 +241,12 @@ git add . && git commit -m "改动说明" && git push
 1. `skills/my-new-skill/` 建目录，放 `SKILL.md`（frontmatter 必须有 `name` + `description`）
 2. 有外部依赖的 skill 自行在 SKILL.md 写清 setup 步骤（pi 对 skill 目录不跑 `npm install`）
 3. commit push 即可
+
+### 加新 prompt 模板
+
+1. `prompts/名字.md` 建文件（文件名即命令名，小写连字符）
+2. 写 frontmatter（`description` 可选）+ 正文
+3. commit push，各设备 `pi update --extensions` 后敲 `/名字` 可用
 
 ## 关于 npm 发布
 
