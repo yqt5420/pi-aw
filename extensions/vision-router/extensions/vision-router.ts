@@ -392,25 +392,42 @@ async function scanAndMaintain(input: ScanInput): Promise<State> {
         if (idx >= pending.length) return;
         const { m } = pending[idx];
         input.onProgress?.(`[vision-router] 测试模型 ${m.provider}/${m.id} 的视觉能力…`);
-        const auth = await input.getAuth(m.provider, m.id);
-        const res = await testModelVision(
-          { id: m.id, baseUrl: m.baseUrl },
-          auth?.apiKey,
-          auth?.headers,
-          input.signal,
-        );
-        tested++;
-        dynamicResults[idx] = {
-          provider: m.provider,
-          model: m.id,
-          baseUrl: m.baseUrl,
-          api: m.api,
-          vision: res.ok,
-          visionUnsupported: res.unsupported,
-          channelError: !res.ok && !res.unsupported,
-          lastTested: now,
-          lastError: res.ok ? undefined : res.error,
-        };
+        try {
+          const auth = await input.getAuth(m.provider, m.id);
+          const res = await testModelVision(
+            { id: m.id, baseUrl: m.baseUrl },
+            auth?.apiKey,
+            auth?.headers,
+            input.signal,
+          );
+          tested++;
+          dynamicResults[idx] = {
+            provider: m.provider,
+            model: m.id,
+            baseUrl: m.baseUrl,
+            api: m.api,
+            vision: res.ok,
+            visionUnsupported: res.unsupported,
+            channelError: !res.ok && !res.unsupported,
+            lastTested: now,
+            lastError: res.ok ? undefined : res.error,
+          };
+        } catch (err) {
+          // 单模型失败不拖垮整轮扫描：标通道异常，继续下一个
+          tested++;
+          const msg = err instanceof Error ? err.message : String(err);
+          input.onProgress?.(`[vision-router] ${m.provider}/${m.id} 测试异常：${msg.slice(0, 120)}`);
+          dynamicResults[idx] = {
+            provider: m.provider,
+            model: m.id,
+            baseUrl: m.baseUrl,
+            api: m.api,
+            vision: false,
+            channelError: true,
+            lastTested: now,
+            lastError: msg.slice(0, 300),
+          };
+        }
       }
     }
 
@@ -867,6 +884,10 @@ export default function (pi: ExtensionAPI) {
       const resolved = isAbsolute(params.imagePath)
         ? params.imagePath
         : join(ctx.cwd, params.imagePath);
+      // 仅允许图片文件，避免把任意文件内容发到外部兜底端点
+      if (!isImagePath(resolved)) {
+        throw new Error("仅支持图片文件（jpg/png/webp/gif/bmp）");
+      }
       // 失败用 throw 让 pi 正确标记 isError
       const { text, channel } = await analyzeImage(
         resolved,
