@@ -10,6 +10,9 @@
 import { formatL1Memories, formatSystemContext } from "./format.js";
 import type { MemoryClient, ScenarioEntry, SearchResultItem } from "./client.js";
 
+/** L2 场景索引最大拉取条数（控住注入体积）。 */
+const SCENE_LIST_LIMIT = 30;
+
 export interface L3L2CacheEntry {
   /** 画像内容；undefined 表示从未成功拉取（不命中缓存） */
   persona: string | null | undefined;
@@ -69,7 +72,7 @@ export async function performRecall(opts: RecallOptions): Promise<RecallResult> 
     const [atomicRes, coreRes, sceneRes] = await Promise.allSettled([
       client.searchAtomic({ query, limit: maxResults }),
       includePersona ? client.readCore() : Promise.resolve(undefined),
-      includeSceneNav ? client.listScenarios() : Promise.resolve(undefined),
+      includeSceneNav ? client.listScenarios({ limit: SCENE_LIST_LIMIT }) : Promise.resolve(undefined),
     ]);
 
     if (atomicRes.status === "fulfilled") {

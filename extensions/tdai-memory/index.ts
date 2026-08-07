@@ -8,7 +8,7 @@
  * 功能：
  * - before_agent_start 并行召回（L1 + L3 + L2，L3/L2 10 分钟缓存）并注入
  * - agent_end fire-and-forget 捕获本回合对话写 L0（失败回合跳过）
- * - 10 个 tdai_* 工具
+ * - 29 个 tdai_* 工具
  * - /tdai-setup 交互式配置
  */
 
@@ -58,6 +58,10 @@ export interface TdaiConfig {
     /** wiki 功能开关（默认 false：实验中，接口/鉴权待重设）。开启后注册 wiki 工具。 */
     enabled: boolean;
   };
+  tools: {
+    /** 工具模式：lite=仅核心高频工具（省 token）；full=全部 29 个。 */
+    mode: "lite" | "full";
+  };
 }
 
 const DEFAULT_CONFIG: TdaiConfig = {
@@ -72,6 +76,7 @@ const DEFAULT_CONFIG: TdaiConfig = {
   recall: { maxResults: 5, includePersona: true, includeSceneNav: true },
   capture: { enabled: true },
   wiki: { enabled: false },
+  tools: { mode: "lite" },
 };
 
 /** 项目级配置路径缓存（按 import.meta.url 计算，进程内不变）。 */
@@ -154,6 +159,7 @@ function mergeConfig(file: Record<string, unknown> | undefined): TdaiConfig {
   const recall = (f.recall ?? {}) as Record<string, unknown>;
   const capture = (f.capture ?? {}) as Record<string, unknown>;
   const wiki = (f.wiki ?? {}) as Record<string, unknown>;
+  const tools = (f.tools ?? {}) as Record<string, unknown>;
   return {
     endpoint: (f.endpoint as string) ?? DEFAULT_CONFIG.endpoint,
     apiKey: (f.apiKey as string) ?? DEFAULT_CONFIG.apiKey,
@@ -173,6 +179,10 @@ function mergeConfig(file: Record<string, unknown> | undefined): TdaiConfig {
     },
     wiki: {
       enabled: (wiki.enabled as boolean) ?? DEFAULT_CONFIG.wiki.enabled,
+    },
+    tools: {
+      // 非法值（非 lite/full）回退到默认 lite，避免被静默当 full
+      mode: tools["mode"] === "lite" || tools["mode"] === "full" ? tools["mode"] : DEFAULT_CONFIG.tools.mode,
     },
   };
 }
@@ -206,6 +216,9 @@ export function loadConfig(): TdaiConfig {
   cfg.capture.enabled = boolFromEnv("TDAI_CAPTURE", cfg.capture.enabled);
   cfg.wiki.enabled = boolFromEnv("TDAI_WIKI", cfg.wiki.enabled);
   cfg.projectAgent = boolFromEnv("TDAI_PROJECT_AGENT", cfg.projectAgent);
+  if (process.env.TDAI_TOOLS_MODE === "lite" || process.env.TDAI_TOOLS_MODE === "full") {
+    cfg.tools.mode = process.env.TDAI_TOOLS_MODE;
+  }
 
   return cfg;
 }
@@ -407,8 +420,43 @@ export function renderToolResult(
 }
 
 // =============================================================================
-// 工具定义（14 个）
+// 工具定义（29 个）
 // =============================================================================
+
+/**
+ * 解析 skill 变更的 expected_version：显式提供则直接用；否则按需取 head 版本。
+ * head 为空/失败时抛错（避免静默传 0 导致乐观锁冲突；也避免每次都先查版本）。 */
+async function resolveVersion(client: MemoryClient, skillId: string, provided?: number): Promise<number> {
+  if (typeof provided === "number" && provided > 0) return provided;
+  const hv = await client.skillHeadVersion(skillId);
+  if (typeof hv !== "number" || hv <= 0) {
+    throw new Error(`技能不存在或无法获取当前版本: ${skillId}`);
+  }
+  return hv;
+}
+
+/**
+ * lite 模式的精简核心工具集（省 token）：团队记忆 + 团队技能 的 创建/删除/搜索/读取。
+ * 其余工具（wiki、记忆深度管理等）仅 tools.mode="full" 时注册。 */
+const LITE_TOOLS = new Set<string>([
+  // 记忆：搜索 / 读取
+  "tdai_memory_search",
+  "tdai_conversation_search",
+  "tdai_read_scene",
+  "tdai_atomic_query",
+  // 记忆：创建（L2/L3 目标写）+ 更新 + 删除
+  "tdai_core_write",
+  "tdai_scenario_write",
+  "tdai_scenario_remove",
+  "tdai_atomic_update",
+  "tdai_atomic_delete",
+  // 技能：搜索 / 读取 / 创建 / 删除 / 提炼
+  "tdai_skill_search",
+  "tdai_skill_view",
+  "tdai_skill_create",
+  "tdai_skill_delete",
+  "tdai_skill_extract",
+]);
 
 function toolResult(text: string): AgentToolResult<unknown> {
   return { content: [{ type: "text", text }], details: {} };
@@ -539,13 +587,14 @@ const tdaiTools: ToolDefinition[] = [
         include_content: true,
         include_manifest: true,
       });
+      // getSkill 返回扁平 skill 对象（顶层即 name/description/content/manifest）
+      const flat = data as unknown as { name?: string; description?: string; content?: string; manifest?: unknown };
       const parts: string[] = [];
-      const skill = data.skill as { name?: string; description?: string } | undefined;
-      if (skill?.name) parts.push(`# ${skill.name}`);
-      if (skill?.description) parts.push(skill.description);
-      const skillContent = safeStr(data.content);
+      if (safeStr(flat.name)) parts.push(`# ${flat.name}`);
+      if (safeStr(flat.description)) parts.push(flat.description as string);
+      const skillContent = safeStr(flat.content);
       if (skillContent) parts.push(skillContent);
-      const manifest = data.manifest;
+      const manifest = flat.manifest;
       if (manifest !== undefined && manifest !== null) {
         parts.push(`manifest: ${JSON.stringify(manifest)}`);
       }
@@ -806,6 +855,337 @@ const tdaiTools: ToolDefinition[] = [
     },
     renderResult: renderToolResult,
   }),
+
+  // 14. L2 场景写入（更新已存在场景块；新建走 L0 对话自动沉淀）
+  defineTool({
+    name: "tdai_scenario_write",
+    label: "写入场景",
+    description: "更新一个已存在的 MemoryCore 场景块（L2，服务端仅更新已存在路径，无 create）。path 来自注入的 <l2_scene_index> 或 tdai_read_scene；新建场景靠后台从 L0 对话 pipeline 自动生成。",
+    promptSnippet: "更新一个 L2 场景知识块",
+    parameters: Type.Object({
+      path: Type.String({ description: "场景路径（须已存在，如 work/2025-01/project-x）" }),
+      content: Type.String({ description: "场景内容（Markdown）" }),
+      summary: Type.Optional(Type.String({ description: "一句话摘要（可再生）" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const err = rejectUnsafePath(params.path, "tdai_scenario_write");
+      if (err) return Promise.resolve(toolResult(err));
+      return makeClient(ctx).scenarioWrite({ path: params.path, content: params.content, summary: params.summary })
+        .then((r) => toolResult(truncate(`已更新场景 ${r.path} (v${r.version ?? "?"})`)));
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 15. L2 场景删除（单条，须已存在）
+  defineTool({
+    name: "tdai_scenario_remove",
+    label: "删除场景",
+    description: "删除单个已存在的 MemoryCore 场景块（L2，须已存在路径）。危险操作，删除前确认。",
+    promptSnippet: "删除单个 L2 场景",
+    parameters: Type.Object({
+      path: Type.String({ description: "要删除的场景路径（须已存在）" }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const err = rejectUnsafePath(params.path, "tdai_scenario_remove");
+      if (err) return Promise.resolve(toolResult(err));
+      return makeClient(ctx).scenarioRemove({ path: params.path })
+        .then((r) => toolResult(truncate(`已删除场景 ${params.path}${r.deleted === undefined ? "" : r.deleted ? " ✓" : "（未删除）"}`)));
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 16. L3 核心画像写入
+  defineTool({
+    name: "tdai_core_write",
+    label: "写入核心画像",
+    description: "写/覆盖 MemoryCore 核心画像（L3，Agent/用户长期画像）。content 为 Markdown，version 自增。用于主动沉淀稳定偏好/画像。",
+    promptSnippet: "写入 L3 核心画像",
+    parameters: Type.Object({
+      content: Type.String({ description: "核心画像内容（Markdown）" }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      return makeClient(ctx).coreWrite({ content: params.content })
+        .then((r) => toolResult(truncate(`已写入核心画像 (v${r.version ?? "?"})`)));
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 17. L1 原子记忆更新（仅更新已存在项）
+  defineTool({
+    name: "tdai_atomic_update",
+    label: "更新原子记忆",
+    description: "更新已有的 L1 原子记忆（id 必填，先用 tdai_memory_search / tdai_atomic_query 定位 id）。用于修正/增强某条偏好/事件/规则/事实。",
+    promptSnippet: "更新一条 L1 原子记忆",
+    parameters: Type.Object({
+      id: Type.String({ description: "要更新的原子记忆 id" }),
+      content: Type.String({ description: "更新后的记忆内容" }),
+      background: Type.Optional(Type.String({ description: "补充背景（可选）" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      return makeClient(ctx).atomicUpdate({ id: params.id, content: params.content, background: params.background })
+        .then((r) => toolResult(truncate(`已更新原子记忆 ${r.id} (v${r.version ?? "?"})`)));
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 18. L1 原子记忆删除
+  defineTool({
+    name: "tdai_atomic_delete",
+    label: "删除原子记忆",
+    description: "批量删除 L1 原子记忆（ids 1-100，先用 tdai_atomic_query 或 tdai_memory_search 定位 id）。危险操作，删除前确认。",
+    promptSnippet: "删除 L1 原子记忆",
+    parameters: Type.Object({
+      ids: Type.Array(Type.String({ description: "要删除的原子记忆 id（1-100）" }), { description: "id 列表" }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      return makeClient(ctx).atomicDelete({ ids: params.ids })
+        .then((r) => toolResult(truncate(`已删除 ${r.deleted_count ?? params.ids.length} 条原子记忆`)));
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 19. L1 原子记忆列表查询（定位 id）
+  defineTool({
+    name: "tdai_atomic_query",
+    label: "列出原子记忆",
+    description: "按类型/分页列出 L1 原子记忆（含 id），用于定位要 update/delete 的目标。",
+    promptSnippet: "列出 L1 原子记忆",
+    parameters: Type.Object({
+      type: Type.Optional(Type.String({ description: "类型过滤：episodic/persona/instruction/fact 等" })),
+      limit: Type.Optional(Type.Number({ description: "返回条数，默认 20" })),
+      offset: Type.Optional(Type.Number({ description: "偏移，默认 0" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      return makeClient(ctx).atomicQuery({ type: params.type, limit: params.limit, offset: params.offset })
+        .then(({ items, total }) => {
+          const text = items.length === 0
+            ? "（无原子记忆）"
+            : items.map((it, i) => `${i + 1}. [${it.type ?? "memory"}] ${it.id ?? "?"} — ${typeof it.content === "string" ? it.content.slice(0, 120) : ""}`).join("\n");
+          return toolResult(truncate(`${text}${total !== undefined ? `\n（共 ${total} 条）` : ""}`));
+        });
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 20. skill 创建
+  defineTool({
+    name: "tdai_skill_create",
+    label: "创建技能",
+    description: "创建一个新的团队技能（Skill）。name 必须与 content 的 frontmatter name 一致，且 frontmatter 必须包含 name 和 description 两个字段（缺 description 会创建失败）；content 为完整 SKILL.md（含 frontmatter）。可选 resources 上传配套文本资源。",
+    promptSnippet: "创建技能",
+    parameters: Type.Object({
+      name: Type.String({ description: "技能名（1-64 字符，需匹配 frontmatter name）" }),
+      content: Type.String({ description: "完整 SKILL.md（含 frontmatter）" }),
+      resources: Type.Optional(Type.Array(
+        Type.Object({
+          path: Type.String({ description: "资源文件相对路径（如 scripts/setup.sh）" }),
+          content: Type.String({ description: "文本内容" }),
+        }),
+        { description: "配套文本资源（≤100 个）" },
+      )),
+      metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "任意元数据" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (params.resources) {
+        for (const r of params.resources) {
+          const err = rejectUnsafePath(r.path, "tdai_skill_create");
+          if (err) return Promise.resolve(toolResult(err));
+        }
+      }
+      return makeClient(ctx).skillCreate({ name: params.name, content: params.content, resources: params.resources, metadata: params.metadata })
+        .then((r) => toolResult(truncate(`已创建技能 ${r.name} (${r.skill_id}) v${r.version}`)));
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 21. skill 更新
+  defineTool({
+    name: "tdai_skill_update",
+    label: "更新技能",
+    description: "全量替换某个技能的 SKILL.md（version+1）。expected_version 不传时自动取当前 head 版本。",
+    promptSnippet: "更新技能内容",
+    parameters: Type.Object({
+      skill_id: Type.String({ description: "技能 id" }),
+      expected_version: Type.Optional(Type.Number({ description: "乐观锁版本（可选，缺省自动取当前 head）" })),
+      content: Type.String({ description: "新的完整 SKILL.md" }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const client = makeClient(ctx);
+      return resolveVersion(client, params.skill_id, params.expected_version)
+        .then((hv) => client.skillUpdate({ skill_id: params.skill_id, expected_version: hv, content: params.content }))
+        .then((r) => toolResult(truncate(`已更新技能 ${r.name} (${r.skill_id}) → v${r.version}`)));
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 22. skill 局部替换
+  defineTool({
+    name: "tdai_skill_patch",
+    label: "局部替换技能",
+    description: "在技能 SKILL.md 中做局部字符串替换（version+1）。old_string 需唯一匹配（replace_all=true 时替换全部）。",
+    promptSnippet: "局部编辑技能",
+    parameters: Type.Object({
+      skill_id: Type.String({ description: "技能 id" }),
+      expected_version: Type.Optional(Type.Number({ description: "乐观锁版本（可选）" })),
+      old_string: Type.String({ description: "要替换的旧文本" }),
+      new_string: Type.String({ description: "新文本" }),
+      replace_all: Type.Optional(Type.Boolean({ description: "是否替换全部匹配（默认 false，要求唯一）" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const client = makeClient(ctx);
+      return resolveVersion(client, params.skill_id, params.expected_version)
+        .then((hv) => client.skillPatch({ skill_id: params.skill_id, expected_version: hv, old_string: params.old_string, new_string: params.new_string, replace_all: params.replace_all }))
+        .then((r) => toolResult(truncate(`已替换技能 ${r.name} → v${r.version}`)));
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 23. skill 删除
+  defineTool({
+    name: "tdai_skill_delete",
+    label: "删除技能",
+    description: "软删除（归档）一个技能。危险操作，删除前确认。expected_version 不传自动取当前 head。",
+    promptSnippet: "删除技能",
+    parameters: Type.Object({
+      skill_id: Type.String({ description: "技能 id" }),
+      expected_version: Type.Optional(Type.Number({ description: "乐观锁版本（可选）" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const client = makeClient(ctx);
+      return resolveVersion(client, params.skill_id, params.expected_version)
+        .then((hv) => client.skillDelete({ skill_id: params.skill_id, expected_version: hv }))
+        .then((r) => toolResult(truncate(r.archived ? `已归档技能 ${r.skill_id}` : `技能 ${r.skill_id} 处理完成（未归档）`)));
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 24. skill 列表
+  defineTool({
+    name: "tdai_skill_list",
+    label: "列出技能",
+    description: "列出团队技能（head 行，分页，可选过滤 owner/状态/名字前缀），返回含 skill_id + version 供进一步操作。",
+    promptSnippet: "列出全部技能",
+    parameters: Type.Object({
+      name_prefix: Type.Optional(Type.String({ description: "名字前缀过滤" })),
+      status: Type.Optional(Type.Array(Type.String({ description: "状态过滤：active/archived" }))),
+      limit: Type.Optional(Type.Number({ description: "返回条数，默认 20" })),
+      offset: Type.Optional(Type.Number({ description: "偏移，默认 0" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      return makeClient(ctx).skillList({
+        filters: { name_prefix: params.name_prefix, status: params.status },
+        limit: params.limit, offset: params.offset,
+      }).then(({ items, total }) => {
+        const text = items.length === 0
+          ? "（无技能）"
+          : items.map((it, i) => `${i + 1}. ${it.name} (${it.skill_id}) v${it.version} [${it.status ?? "?"}]${it.description ? ` — ${it.description}` : ""}`).join("\n");
+        return toolResult(truncate(`${text}\n（共 ${total} 条）`));
+      });
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 25. skill 版本历史
+  defineTool({
+    name: "tdai_skill_versions",
+    label: "技能版本历史",
+    description: "列出某个技能的全部历史版本（version + 状态），用于查看演进 / 定位特定版本。",
+    promptSnippet: "查看技能版本",
+    parameters: Type.Object({
+      skill_id: Type.String({ description: "技能 id" }),
+      limit: Type.Optional(Type.Number({ description: "返回条数，默认 20" })),
+      offset: Type.Optional(Type.Number({ description: "偏移，默认 0" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      return makeClient(ctx).skillVersions({ skill_id: params.skill_id, limit: params.limit, offset: params.offset })
+        .then(({ items, total }) => {
+          const text = items.length === 0
+            ? "（无版本）"
+            : items.map((it, i) => `${i + 1}. v${it.version} [${it.status ?? "?"}]${it.is_head ? " (head)" : ""}`).join("\n");
+          return toolResult(truncate(`${text}\n（共 ${total} 个版本）`));
+        });
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 26. skill 资源文件写入
+  defineTool({
+    name: "tdai_skill_files_write",
+    label: "写入技能资源文件",
+    description: "批量写入/更新技能的配套资源文件（utf-8 文本，version+1）。path 为技能包内相对路径（如 scripts/setup.sh）。",
+    promptSnippet: "写入技能资源文件",
+    parameters: Type.Object({
+      skill_id: Type.String({ description: "技能 id" }),
+      expected_version: Type.Optional(Type.Number({ description: "乐观锁版本（可选）" })),
+      files: Type.Array(
+        Type.Object({
+          path: Type.String({ description: "资源相对路径（如 scripts/setup.sh）" }),
+          content: Type.String({ description: "文本内容" }),
+          is_executable: Type.Optional(Type.Boolean({ description: "是否可执行" })),
+        }),
+        { description: "要写入的资源文件（1-100 个）" },
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      for (const f of params.files) {
+        const err = rejectUnsafePath(f.path, "tdai_skill_files_write");
+        if (err) return Promise.resolve(toolResult(err));
+      }
+      const client = makeClient(ctx);
+      return resolveVersion(client, params.skill_id, params.expected_version)
+        .then((hv) => client.skillFilesWrite({ skill_id: params.skill_id, expected_version: hv, files: params.files }))
+        .then((r) => toolResult(truncate(`已写入 ${params.files.length} 个资源文件 → ${r.name} v${r.version}`)));
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 27. skill 资源文件删除
+  defineTool({
+    name: "tdai_skill_files_remove",
+    label: "删除技能资源文件",
+    description: "批量删除技能的配套资源文件（version+1）。path 为技能包内相对路径。",
+    promptSnippet: "删除技能资源文件",
+    parameters: Type.Object({
+      skill_id: Type.String({ description: "技能 id" }),
+      expected_version: Type.Optional(Type.Number({ description: "乐观锁版本（可选）" })),
+      paths: Type.Array(Type.String({ description: "要删除的资源相对路径" }), { description: "路径列表（1-100）" }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      for (const p of params.paths) {
+        const err = rejectUnsafePath(p, "tdai_skill_files_remove");
+        if (err) return Promise.resolve(toolResult(err));
+      }
+      const client = makeClient(ctx);
+      return resolveVersion(client, params.skill_id, params.expected_version)
+        .then((hv) => client.skillFilesRemove({ skill_id: params.skill_id, expected_version: hv, paths: params.paths }))
+        .then((r) => toolResult(truncate(`已删除 ${params.paths.length} 个资源文件 → ${r.name} v${r.version}`)));
+    },
+    renderResult: renderToolResult,
+  }),
+
+  // 28. skill 会话喂入（触发自动提炼）
+  defineTool({
+    name: "tdai_skill_conversation_add",
+    label: "喂入会话提炼技能",
+    description: "将若干条对话消息喂给 skill 管道，后台自动判断是否触发技能提炼（达到阈值自动归档生成提取任务）。role 建议用 user/assistant。",
+    promptSnippet: "把对话喂给技能提炼管道",
+    parameters: Type.Object({
+      messages: Type.Array(
+        Type.Object({
+          role: Type.String({ description: "角色：user/assistant" }),
+          content: Type.String({ description: "消息文本" }),
+        }),
+        { description: "要喂入的消息（1-100 条）" },
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      return makeClient(ctx)
+        .skillConversationAdd({ session_id: ctx.sessionManager.getSessionId(), messages: params.messages })
+        .then((r) => toolResult(truncate(r.status === "archived" ? `已触发技能提炼归档：${JSON.stringify(r.archived)}` : `已喂入会话（status: ${r.status}）`)));
+    },
+    renderResult: renderToolResult,
+  }),
+
 ];
 
 // =============================================================================
@@ -979,6 +1359,23 @@ export default async function tdaiMemoryExtension(pi: ExtensionAPI): Promise<voi
     },
   });
 
+  // /tdai-tools：切换工具模式（lite=精简核心集/省 token；full=全部 29 个）
+  pi.registerCommand("tdai-tools", {
+    description: "切换 tdai 工具模式（lite=精简核心集省 token / full=全部工具）",
+    handler: async (_args, ctx) => {
+      const cur = loadConfig().tools.mode;
+      const next: "lite" | "full" = cur === "lite" ? "full" : "lite";
+      try {
+        const existing = loadConfig();
+        writeConfig({ ...existing, tools: { mode: next } });
+        config.tools.mode = next;
+        ctx.ui.notify?.(`tdai 工具模式 → ${next}（运行 /reload 生效）`, "info");
+      } catch (error) {
+        ctx.ui.notify?.(`切换失败: ${errorMsg(error)}`, "error");
+      }
+    },
+  });
+
   if (needsSetup) return;
 
   // -------------------------------------------------------------------------
@@ -1032,10 +1429,13 @@ export default async function tdaiMemoryExtension(pi: ExtensionAPI): Promise<voi
     if (agentId) sessionAgentId.set(sessionId, agentId);
   });
 
-  // 注册工具：wiki 工具（tdai_wiki_*）仅当 config.wiki.enabled=true 时注册（实验中，默认关闭）
+  // 注册工具：wiki 工具（tdai_wiki_*）仅当 config.wiki.enabled=true 时注册（实验中，默认关闭）；
+  // lite 模式仅注册 LITE_TOOLS 核心集（省 token），full 模式注册全部。
   const isWikiTool = (name: string) => name.startsWith("tdai_wiki_");
+  const isLite = (name: string) => LITE_TOOLS.has(name);
   for (const tool of tdaiTools) {
     if (isWikiTool(tool.name) && !config.wiki.enabled) continue;
+    if (config.tools.mode === "lite" && !isLite(tool.name)) continue;
     pi.registerTool(tool);
   }
 

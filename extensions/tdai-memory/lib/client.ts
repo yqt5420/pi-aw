@@ -376,9 +376,11 @@ export class MemoryClient {
   // L2 场景
   // ---------------------------------------------------------------------------
 
-  /** 场景索引（L2）。 */
-  async listScenarios(): Promise<{ entries: ScenarioEntry[]; total: number }> {
-    return (await this.postData("/v3/scenario/ls", {})) as { entries: ScenarioEntry[]; total: number };
+  /** 场景索引（L2）。limit 控住注入体积，避免无界拉取。 */
+  async listScenarios(input: { limit?: number } = {}): Promise<{ entries: ScenarioEntry[]; total: number }> {
+    return (await this.postData("/v3/scenario/ls", {
+      ...(input.limit !== undefined ? { limit: input.limit } : {}),
+    })) as { entries: ScenarioEntry[]; total: number };
   }
 
   /** 场景全文（L2）。 */
@@ -404,6 +406,62 @@ export class MemoryClient {
   }
 
   // ---------------------------------------------------------------------------
+  // L2/L3/L1 写入与删除（Agent 主动沉淀记忆）
+  // ---------------------------------------------------------------------------
+
+  /** 更新已存在的 L2 场景块（服务端无 create——新建走 L0 对话 pipeline 自动提炼）。 */
+  async scenarioWrite(
+    input: { path: string; content: string; summary?: string },
+  ): Promise<{ path: string; version?: number; summary?: string; updated_at?: string }> {
+    return (await this.postData("/v3/scenario/write", {
+      path: input.path,
+      content: input.content,
+      ...(input.summary ? { summary: input.summary } : {}),
+    })) as { path: string; version?: number; summary?: string; updated_at?: string };
+  }
+
+  /** 删除单个 L2 场景（path 必须已存在）。 */
+  async scenarioRemove(input: { path: string }): Promise<{ deleted?: boolean; [k: string]: unknown }> {
+    return (await this.postData("/v3/scenario/rm", { path: input.path })) as { deleted?: boolean; [k: string]: unknown };
+  }
+
+  /** 写 L3 核心画像（覆盖写，version 自增）。 */
+  async coreWrite(input: { content: string }): Promise<{ content?: string; version?: number; updated_at?: string }> {
+    return (await this.postData("/v3/core/write", { content: input.content })) as {
+      content?: string;
+      version?: number;
+      updated_at?: string;
+    };
+  }
+
+  /** 更新已有 L1 原子记忆（id 必填——只能更新已存在项，需先 search/query 定位）。 */
+  async atomicUpdate(
+    input: { id: string; content: string; background?: string },
+  ): Promise<{ id: string; version?: string; updated_at?: string }> {
+    return (await this.postData("/v3/atomic/update", {
+      id: input.id,
+      content: input.content,
+      ...(input.background ? { background: input.background } : {}),
+    })) as { id: string; version?: string; updated_at?: string };
+  }
+
+  /** 批量删除 L1 原子记忆（ids 1-100）。 */
+  async atomicDelete(input: { ids: string[] }): Promise<{ deleted_count?: number }> {
+    return (await this.postData("/v3/atomic/delete", { ids: input.ids })) as { deleted_count?: number };
+  }
+
+  /** 按类型/分页列出 L1 原子记忆（辅助定位 id 用于 update/delete）。 */
+  async atomicQuery(
+    input: { type?: string; limit?: number; offset?: number },
+  ): Promise<{ items: Array<{ id?: string; content?: string; type?: string; [k: string]: unknown }>; total?: number }> {
+    return (await this.postData("/v3/atomic/query", {
+      ...(input.type ? { type: input.type } : {}),
+      ...(input.limit !== undefined ? { limit: input.limit } : {}),
+      ...(input.offset !== undefined ? { offset: input.offset } : {}),
+    })) as { items: Array<{ id?: string; content?: string; type?: string; [k: string]: unknown }>; total?: number };
+  }
+
+  // ---------------------------------------------------------------------------
   // 技能库
   // ---------------------------------------------------------------------------
 
@@ -418,15 +476,15 @@ export class MemoryClient {
     })) as { items: SkillItem[] };
   }
 
-  /** 获取技能详情（含 content / manifest）。 */
+  /** 获取技能详情（返回扁平 skill 对象：顶层即 name/description/content/manifest/version）。 */
   async getSkill(
     input: { skill_id: string; include_content?: boolean; include_manifest?: boolean },
-  ): Promise<{ skill: SkillItem; content?: string; [key: string]: unknown }> {
+  ): Promise<{ name?: string; description?: string; content?: string; manifest?: unknown; version?: number; status?: string; [key: string]: unknown }> {
     return (await this.postData("/v3/skill/get", {
       skill_id: input.skill_id,
       ...(input.include_content !== undefined ? { include_content: input.include_content } : {}),
       ...(input.include_manifest !== undefined ? { include_manifest: input.include_manifest } : {}),
-    })) as { skill: SkillItem; content?: string; [key: string]: unknown };
+    })) as { name?: string; description?: string; content?: string; manifest?: unknown; version?: number; status?: string; [key: string]: unknown };
   }
 
   /** 读取技能资源文件。 */
@@ -448,6 +506,129 @@ export class MemoryClient {
       messages: input.messages,
       ...(input.reason ? { reason: input.reason } : {}),
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // 技能库完整能力（CRUD + files + conversation ingest）
+  // ---------------------------------------------------------------------------
+
+  /** 取 skill 当前 head version（用于 update/delete/files 的乐观锁 expected_version）。 */
+  async skillHeadVersion(skill_id: string): Promise<number> {
+    const { items } = await this.skillVersions({ skill_id, limit: 1 });
+    const head = items.find((i) => i.is_head) ?? items[0];
+    return head && typeof head.version === "number" ? head.version : 0;
+  }
+
+  /** 创建 skill（version=1, is_head=true）。resources 可选（utf-8 文本资源）。 */
+  async skillCreate(
+    input: {
+      name: string;
+      content: string;
+      resources?: Array<{ path: string; content: string; mime_type?: string; is_executable?: boolean }>;
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<{ skill_id: string; name: string; version: number; status?: string; [k: string]: unknown }> {
+    return (await this.postData("/v3/skill/create", {
+      name: input.name,
+      content: input.content,
+      ...(input.resources && input.resources.length
+        ? { resources: input.resources.map((r) => ({ path: r.path, content: r.content, encoding: "utf-8", mime_type: r.mime_type, is_executable: r.is_executable })) }
+        : {}),
+      ...(input.metadata ? { metadata: input.metadata } : {}),
+    })) as { skill_id: string; name: string; version: number; status?: string; [k: string]: unknown };
+  }
+
+  /** 全量替换 SKILL.md（version+1）。 */
+  async skillUpdate(
+    input: { skill_id: string; expected_version: number; content: string },
+  ): Promise<{ skill_id: string; name: string; version: number; [k: string]: unknown }> {
+    return (await this.postData("/v3/skill/update", {
+      skill_id: input.skill_id,
+      expected_version: input.expected_version,
+      content: input.content,
+    })) as { skill_id: string; name: string; version: number; [k: string]: unknown };
+  }
+
+  /** 局部字符串替换（version+1）。 */
+  async skillPatch(
+    input: { skill_id: string; expected_version: number; old_string: string; new_string: string; replace_all?: boolean },
+  ): Promise<{ skill_id: string; name: string; version: number; [k: string]: unknown }> {
+    return (await this.postData("/v3/skill/patch", {
+      skill_id: input.skill_id,
+      expected_version: input.expected_version,
+      old_string: input.old_string,
+      new_string: input.new_string,
+      ...(input.replace_all ? { replace_all: input.replace_all } : {}),
+    })) as { skill_id: string; name: string; version: number; [k: string]: unknown };
+  }
+
+  /** 软删除（归档）skill，不 bump version。 */
+  async skillDelete(
+    input: { skill_id: string; expected_version: number },
+  ): Promise<{ skill_id: string; archived?: boolean }> {
+    return (await this.postData("/v3/skill/delete", {
+      skill_id: input.skill_id,
+      expected_version: input.expected_version,
+    })) as { skill_id: string; archived?: boolean };
+  }
+
+  /** 列出团队 skill（head 行，分页）。 */
+  async skillList(
+    input: { filters?: { owner_agent_id?: string; name_prefix?: string; status?: string[] }; limit?: number; offset?: number } = {},
+  ): Promise<{ items: Array<{ skill_id: string; name: string; version: number; status?: string; description?: string; [k: string]: unknown }>; total: number }> {
+    return (await this.postData("/v3/skill/list", {
+      ...(input.filters ? { filters: input.filters } : {}),
+      ...(input.limit !== undefined || input.offset !== undefined ? { pagination: { limit: input.limit, offset: input.offset } } : {}),
+    })) as { items: Array<{ skill_id: string; name: string; version: number; status?: string; description?: string; [k: string]: unknown }>; total: number };
+  }
+
+  /** 列出 single skill 的全部历史版本。 */
+  async skillVersions(
+    input: { skill_id: string; limit?: number; offset?: number },
+  ): Promise<{ items: Array<{ skill_id: string; version: number; is_head?: boolean; status?: string; [k: string]: unknown }>; total: number }> {
+    return (await this.postData("/v3/skill/versions", {
+      skill_id: input.skill_id,
+      ...(input.limit !== undefined || input.offset !== undefined ? { pagination: { limit: input.limit, offset: input.offset } } : {}),
+    })) as { items: Array<{ skill_id: string; version: number; is_head?: boolean; status?: string; [k: string]: unknown }>; total: number };
+  }
+
+  /** 批量写入 skill 资源文件（utf-8 文本；version+1）。 */
+  async skillFilesWrite(
+    input: {
+      skill_id: string;
+      expected_version: number;
+      files: Array<{ path: string; content: string; mime_type?: string; is_executable?: boolean }>;
+    },
+  ): Promise<{ skill_id: string; name: string; version: number; [k: string]: unknown }> {
+    return (await this.postData("/v3/skill/files/write", {
+      skill_id: input.skill_id,
+      expected_version: input.expected_version,
+      files: input.files.map((f) => ({ path: f.path, content: f.content, encoding: "utf-8", mime_type: f.mime_type, is_executable: f.is_executable })),
+    })) as { skill_id: string; name: string; version: number; [k: string]: unknown };
+  }
+
+  /** 批量删除 skill 资源文件（version+1）。 */
+  async skillFilesRemove(
+    input: { skill_id: string; expected_version: number; paths: string[] },
+  ): Promise<{ skill_id: string; name: string; version: number; [k: string]: unknown }> {
+    return (await this.postData("/v3/skill/files/remove", {
+      skill_id: input.skill_id,
+      expected_version: input.expected_version,
+      paths: input.paths,
+    })) as { skill_id: string; name: string; version: number; [k: string]: unknown };
+  }
+
+  /** 将本回合增量消息喂给 skill 管道（自动归档触发）。 */
+  async skillConversationAdd(
+    input: {
+      session_id: string;
+      messages: Array<{ role: string; content: string; tool_call_id?: string }>;
+    },
+  ): Promise<{ status: string; archived?: { task_id: string; reason?: string } }> {
+    return (await this.postData("/v3/skill/conversation/add", {
+      session_id: input.session_id,
+      messages: input.messages,
+    })) as { status: string; archived?: { task_id: string; reason?: string } };
   }
 
   // ---------------------------------------------------------------------------
@@ -534,6 +715,7 @@ export class MemoryClient {
     }
   }
 
+  // ---------------------------------------------------------------------------
   // ---------------------------------------------------------------------------
   // Wiki 层（hub 8424，Bearer + service-id，只带 team_id）
   // ---------------------------------------------------------------------------
