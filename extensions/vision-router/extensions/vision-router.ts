@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join, dirname, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { randomInt } from "node:crypto";
@@ -122,8 +122,14 @@ function encodeImageDataUrl(imagePath: string): string {
   const dot = imagePath.lastIndexOf(".");
   const ext = imagePath.slice(dot).toLowerCase();
   const mime = MIME_MAP[ext] ?? "image/jpeg";
+  // 先按文件大小校验，避免超大文件整块读入内存后才报错（潜在 OOM）
+  const size = statSync(imagePath).size;
+  if (size > MAX_IMAGE_BYTES) {
+    throw new Error(`图片过大（${(size / 1024 / 1024).toFixed(1)}MB），上限 15MB`);
+  }
   const buf = readFileSync(imagePath);
   if (buf.length > MAX_IMAGE_BYTES) {
+    // 双保险：读入后再次校验（stat 与实际读取之间文件可能变化）
     throw new Error(`图片过大（${(buf.length / 1024 / 1024).toFixed(1)}MB），上限 15MB`);
   }
   return `data:${mime};base64,${buf.toString("base64")}`;
@@ -388,6 +394,8 @@ async function scanAndMaintain(input: ScanInput): Promise<State> {
 
     async function worker() {
       while (true) {
+        // 信号已中止则不再启动新的实测，尽早收尾
+        if (input.signal?.aborted) return;
         const idx = nextIdx++;
         if (idx >= pending.length) return;
         const { m } = pending[idx];
@@ -696,12 +704,12 @@ export default function (pi: ExtensionAPI) {
 
   async function doScan(
     ctx: { modelRegistry: { getAvailable(): unknown[] }; signal?: AbortSignal | null; ui: { notify(msg: string, level: string): void } },
-    opts: { silent?: boolean } = {},
+    opts: { silent?: boolean; force?: boolean } = {},
   ) {
     const models = collectModels(ctx);
     if (models.length === 0) return;
-    // 60s 去重
-    if (Date.now() - lastScanAt < 60_000 && readState().updatedAt > 0) return;
+    // 60s 去重（手动 /vision-scan 传 force:true 绕过，确保用户主动触发一定执行）
+    if (!opts.force && Date.now() - lastScanAt < 60_000 && readState().updatedAt > 0) return;
     lastScanAt = Date.now();
     const notify = (msg: string) => {
       if (!opts.silent) ctx.ui.notify(msg, "info");
@@ -833,7 +841,7 @@ export default function (pi: ExtensionAPI) {
     description: "立即扫描并实测所有模型的视觉能力",
     handler: async (_args, ctx) => {
       ctx.ui.notify("开始扫描模型视觉能力…", "info");
-      await doScan(ctx, { silent: false });
+      await doScan(ctx, { silent: false, force: true });
       ctx.ui.notify("扫描完成！运行 /vision-status 查看结果", "info");
     },
   });
