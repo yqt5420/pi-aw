@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 
 /**
@@ -100,7 +100,7 @@ function readState(): State {
 
 function writeState(state: State): void {
   try {
-    const dir = STATE_FILE.substring(0, STATE_FILE.lastIndexOf("/"));
+    const dir = dirname(STATE_FILE);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     // 原子写：tmp + rename，避免进程中断留下半截 JSON
     const tmpPath = `${STATE_FILE}.tmp.${process.pid}.${Date.now()}`;
@@ -747,7 +747,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify("用法：/vision-test <图片路径>", "warning");
         return;
       }
-      const resolved = imagePath.startsWith("/")
+      const resolved = isAbsolute(imagePath)
         ? imagePath
         : join(ctx.cwd, imagePath);
       if (!isImagePath(resolved)) {
@@ -779,7 +779,7 @@ export default function (pi: ExtensionAPI) {
       prompt: Type.Optional(Type.String({ description: "Optional custom prompt" })),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const resolved = params.imagePath.startsWith("/")
+      const resolved = isAbsolute(params.imagePath)
         ? params.imagePath
         : join(ctx.cwd, params.imagePath);
       // 失败用 throw 让 pi 正确标记 isError
