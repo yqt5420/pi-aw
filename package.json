@@ -1,7 +1,7 @@
 {
   "name": "pi-aw",
   "version": "0.1.0",
-  "description": "个人 pi (coding agent) 扩展与技能集合：extension + skill 一体 git package，跨设备同步用",
+  "description": "个人 pi (coding agent) 扩展集合：extension 一体 git package，跨设备同步用",
   "private": true,
   "type": "module",
   "keywords": [

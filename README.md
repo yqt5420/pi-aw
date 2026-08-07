@@ -1,8 +1,8 @@
 # pi-aw
 
-个人 [pi coding agent](https://github.com/earendil-works/pi-coding-agent) 扩展与技能集合。
+个人 [pi coding agent](https://github.com/earendil-works/pi-coding-agent) 扩展集合。
 
-一个 git package 同时声明 `extensions` + `skills`，跨设备用 `pi install git:...` 一行装全套。
+一个 git package 声明 `extensions` + `prompts`，跨设备用 `pi install git:...` 一行装全套。
 不走 npm 发布——纯 git 分发，clone 即用。
 
 ## 包含内容
@@ -19,13 +19,6 @@
 | `extensions/pi-goal-cn` | 目标管理（中文界面） | 无 |
 | `extensions/pi-newapi` | 自动发现 NewAPI / one-api 网关模型、定价，用 models.dev 补全真实上下文窗口 | `~/.pi/agent/newapi-config.json` / 环境变量 `NEWAPI_BASE_URL` / `NEWAPI_API_KEY` |
 
-### Skills（技能，2 个）
-
-| 目录 | 说明 | 平台 |
-|------|------|------|
-| `skills/agent-reach` | 全网调研 / 多平台搜索（小红书/推特/B站/Reddit 等 15 平台） | 跨平台 |
-| `skills/procmem-scanner` | 进程内存扫描器，提取运行时内存中的 API key / token | **Windows 专用** |
-
 ## 安装
 
 任意装好 pi 的设备，一行命令：
@@ -38,7 +31,7 @@ pi 会：
 1. clone 到 `~/.pi/agent/git/github.com/yqt5420/pi-aw`
 2. 跑 `npm install` 装好运行时依赖（`@narumitw/pi-tui-kit` 等）
 3. 把这行写进 `~/.pi/agent/settings.json` 的 `packages` 数组
-4. 加载 `extensions/` 下 7 个 extension + `skills/` 下 2 个 skill + `prompts/` 下的提示词模板
+4. 加载 `extensions/` 下 7 个 extension + `prompts/` 下的提示词模板
 
 装完重启 pi 即生效。**这套设备的 settings 不用手改。**
 
@@ -58,7 +51,7 @@ pi update --extensions
 pi install git:github.com/yqt5420/pi-aw@v1.0   # 换成 tag
 ```
 
-## 按设备裁剪（不想用某个插件/skill）
+## 按设备裁剪（不想用某个插件）
 
 `pi remove` 的粒度是整个 package（删整个 `pi-aw`），**不能单独卸某个 extension**。
 但用 settings 的 **glob 排除** 能达到等同卸载的效果（不加载、不占 context、工具不注册）。
@@ -72,8 +65,7 @@ pi install git:github.com/yqt5420/pi-aw@v1.0   # 换成 tag
   "packages": [
     {
       "source": "git:github.com/yqt5420/pi-aw@main",
-      "extensions": ["extensions/**", "-extensions/tdai-memory"],
-      "skills": ["skills/**", "-skills/procmem-scanner"]
+      "extensions": ["extensions/**", "-extensions/tdai-memory"]
     }
   ]
 }
@@ -88,14 +80,13 @@ pi install git:github.com/yqt5420/pi-aw@v1.0   # 换成 tag
   "packages": [
     {
       "source": "git:github.com/yqt5420/pi-aw@main",
-      "extensions": ["extensions/token-speed/**", "extensions/vision-router/**"],
-      "skills": []
+      "extensions": ["extensions/token-speed/**", "extensions/vision-router/**"]
     }
   ]
 }
 ```
 
-白名单写法：只列要的，其余都不加载。`skills: []` 表示一个 skill 都不加载。
+白名单写法：只列要的，其余都不加载。
 
 ### 交互式开关
 
@@ -192,7 +183,7 @@ argument-hint: "<范围>"
 
 ### 按设备裁剪提示词
 
-和 extension/skill 一样，settings 里用对象形式过滤：
+和 extension 一样，settings 里用对象形式过滤：
 
 ```json
 {
@@ -207,23 +198,11 @@ argument-hint: "<范围>"
 
 `prompts: []` 表示一个模板都不加载。详见 [pi prompt-templates 文档](https://github.com/earendil-works/pi-coding-agent)。
 
-## procmem-scanner 的虚拟环境（Windows 专用）
-
-`.venv` 不进 git，每台 Windows 设备首次使用前在 skill 目录重建：
-
-```bash
-cd ~/.pi/agent/git/github.com/yqt5420/pi-aw/skills/procmem-scanner
-uv venv
-.venv/Scripts/pip install -r requirements.txt
-```
-
-未装 uv 时可用 `python -m venv .venv` 替代。非 Windows 设备在 settings 排除该 skill（见"按设备裁剪"）。
-
 ## 目录结构
 
 ```
 pi-aw/
-├── package.json              # pi package 主清单：pi.extensions + pi.skills + 依赖
+├── package.json              # pi package 主清单：pi.extensions + 依赖
 ├── .gitignore
 ├── extensions/               # 7 个 extension，各自子 package.json 指明入口
 │   ├── vision-router/{ extensions/vision-router.ts, package.json }
@@ -233,11 +212,7 @@ pi-aw/
 │   ├── pi-plan-mode-cn/{ src/, scripts/, zh-cn.json, package.json }
 │   ├── pi-subagents-cn/{ src/, scripts/, zh-cn.json, package.json }
 │   └── pi-goal-cn/{ src/, scripts/, zh-cn.json, package.json }
-├── skills/                   # 2 个 skill
-│   ├── agent-reach/{ SKILL.md, references/ }
-│   └── procmem-scanner/{ SKILL.md, procmem_scanner.py, requirements.txt }
 └── prompts/                  # 提示词模板（.md 文件 → /名字 命令）
-    ├── README.md             # 模板说明
     └── review.md             # 示例：/review
 ```
 
@@ -258,12 +233,6 @@ git add . && git commit -m "改动说明" && git push
 2. 加一个子 `package.json`：`{ "pi": { "extensions": ["./入口.ts"] } }`
 3. 若有 npm 运行时依赖，加到**根** `package.json` 的 `dependencies`
 4. commit push，各设备 `pi update --extensions` 自动拉新并重装依赖
-
-### 加新 skill
-
-1. `skills/my-new-skill/` 建目录，放 `SKILL.md`（frontmatter 必须有 `name` + `description`）
-2. 有外部依赖的 skill 自行在 SKILL.md 写清 setup 步骤（pi 对 skill 目录不跑 `npm install`）
-3. commit push 即可
 
 ### 加新 prompt 模板
 
