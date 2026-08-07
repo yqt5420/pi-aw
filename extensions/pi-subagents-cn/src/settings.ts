@@ -89,7 +89,8 @@ export function normalizeSubagentSettings(value: unknown): SubagentSettings | un
 		const agents: Record<string, SubagentAgentConfig> = {};
 		for (const [name, rawConfig] of Object.entries(value.agents)) {
 			const config = normalizeAgentSettings(rawConfig);
-			if (config) agents[name] = config;
+			// 用 defineProperty 防 __proto__/constructor 特殊键触原型 setter（与下方写入路径一致）
+			if (config) Object.defineProperty(agents, name, { value: config, enumerable: true, configurable: true, writable: true });
 		}
 		if (Object.keys(agents).length > 0) settings.agents = agents;
 	}

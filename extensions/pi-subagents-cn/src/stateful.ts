@@ -155,7 +155,7 @@ export function registerStatefulSubagents(
 		};
 		const transition = runtimeTransition.then(clear, clear);
 		runtimeTransition = transition.catch(() => undefined);
-		await transition;
+		await runtimeTransition;
 		return count;
 	};
 	const controller: StatefulSubagentController = {
@@ -329,7 +329,7 @@ export function registerStatefulSubagents(
 		};
 		const transition = runtimeTransition.then(initialize, initialize);
 		runtimeTransition = transition.catch(() => undefined);
-		await transition;
+		await runtimeTransition;
 	});
 
 	pi.on("agent_start", () => {
@@ -367,7 +367,7 @@ export function registerStatefulSubagents(
 		};
 		const transition = runtimeTransition.then(shutdown, shutdown);
 		runtimeTransition = transition.catch(() => undefined);
-		await transition;
+		await runtimeTransition;
 	});
 
 	const baseSpawnDescription = () =>
