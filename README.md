@@ -17,7 +17,7 @@
 | `extensions/pi-plan-mode-cn` | 只读 `/plan` 协作模式（中文界面） | 无 |
 | `extensions/pi-subagents-cn` | 子代理管理（中文界面） | 无 |
 | `extensions/pi-goal-cn` | 目标管理（中文界面） | 无 |
-| `extensions/pi-newapi` | 自动发现 NewAPI / one-api 网关的模型、定价、推理兼容 | `~/.pi/agent/newapi-config.json` / 环境变量 `NEWAPI_BASE_URL` / `NEWAPI_API_KEY` |
+| `extensions/pi-newapi` | 自动发现 NewAPI / one-api 网关模型、定价，用 models.dev 补全真实上下文窗口 | `~/.pi/agent/newapi-config.json` / 环境变量 `NEWAPI_BASE_URL` / `NEWAPI_API_KEY` |
 
 ### Skills（技能，2 个）
 
@@ -134,6 +134,29 @@ tdai-memory / pi-newapi 各有本机 json，**不进 git**（`.gitignore` 已排
 ### 3. 项目级覆盖（某个项目特有）
 
 tdai-memory 支持 `{项目根}/.pi/tdai-memory.json`，只对该项目生效，可提交团队共享或本机独占。
+
+## pi-newapi 用法
+
+自动发现 NewAPI / one-api 网关模型，用 [models.dev](https://models.dev) 目录补全真实上下文窗口 / 最大输出 / 推理能力（网关 `/api/pricing` 不含这些字段，启发式猜测不准）。
+
+配置（每台设备各自配，不进 git）：
+
+```json
+// ~/.pi/agent/newapi-config.json
+{ "baseUrl": "https://your-gateway/v1", "apiKey": "sk-..." }
+```
+
+或环境变量 `NEWAPI_BASE_URL` / `NEWAPI_API_KEY`；`/login newapi` 也可交互登录。
+
+命令：
+
+- `/newapi-url <url>` — 设网关地址，保存后自动重载
+- `/newapi-refresh-meta [proxy]` — curl 重拉 models.dev 元数据（可选代理参数，如 `http://127.0.0.1:12080`）
+- `/newapi-list` — 列出模型 + 上下文窗口 / 最大输出 / 来源
+
+上下文来源优先级：`~/.pi/agent/modelsdev-cache.json`（刷新写入）> 随包 `models.dev.snapshot.json`（零网络基准）> 厂商启发式。首次无需联网即有准确值。
+
+> 思考档位说明：网关对 `reasoning_effort` 不做枚举校验，实测各模型为开/关型而非真 4 档梯度，pi 默认档位选择不报错；精确档位无法从任何目录获取。
 
 ## 提示词模板（prompt templates）
 
