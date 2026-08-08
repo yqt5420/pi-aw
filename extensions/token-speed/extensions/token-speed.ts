@@ -22,6 +22,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 const SUBAGENT_TOOLS = new Set(["subagent", "subagent_consult"]);
 const APPROX_CHARS_PER_TOKEN = 4;
+/** 汇总展示后自动清除的时长（5 分钟） */
+const CLEAR_AFTER_MS = 5 * 60 * 1000;
 
 export default function (pi: ExtensionAPI) {
 	// 主 agent 流式显示状态
@@ -38,6 +40,10 @@ export default function (pi: ExtensionAPI) {
 	let timer: ReturnType<typeof setInterval> | null = null;
 	let clearTimer: ReturnType<typeof setTimeout> | null = null;
 	let latestCtx: ExtensionContext | null = null;
+
+	// 会话级缓存命中率累积（跨轮跨子代理，仅在有缓存数据时才展示）
+	let sessionCacheRead = 0;
+	let sessionInput = 0;
 
 	// 子代理显示状态
 	let subActive = false;
@@ -75,6 +81,14 @@ export default function (pi: ExtensionAPI) {
 		return hasFirstToken ? `${(firstTokenTime / 1000).toFixed(1)}s` : "...";
 	}
 
+	/** 会话级缓存读取命中率后缀。无缓存数据时返回空串（不展示）。 */
+	function cacheHitSuffix(): string {
+		const total = sessionCacheRead + sessionInput;
+		if (sessionCacheRead <= 0 || total <= 0) return "";
+		const pct = Math.round((sessionCacheRead / total) * 100);
+		return ` | 缓存 ${pct}% (${fmtTokens(sessionCacheRead)}读)`;
+	}
+
 	function buildLabel(
 		tokenCount: number,
 		elapsedSec: number,
@@ -84,7 +98,7 @@ export default function (pi: ExtensionAPI) {
 		const ttfb = hasFirstToken
 			? ` | 首 ${(firstTokenTime / 1000).toFixed(1)}s`
 			: "";
-		return `${prefix} ${fmtTokens(tokenCount)} tok @ ${speed} t/s (${elapsedSec.toFixed(1)}s)${ttfb}`;
+		return `${prefix} ${fmtTokens(tokenCount)} tok @ ${speed} t/s (${elapsedSec.toFixed(1)}s)${ttfb}${cacheHitSuffix()}`;
 	}
 
 	function updateStatus() {
@@ -267,6 +281,9 @@ export default function (pi: ExtensionAPI) {
 		// 重置子代理状态，避免上一个被中止（end 被跳过）的残留跨会话带入
 		subActive = false;
 		subLatestCtx = null;
+		// 重置会话级缓存累积，避免跨会话带入
+		sessionCacheRead = 0;
+		sessionInput = 0;
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
@@ -307,6 +324,11 @@ export default function (pi: ExtensionAPI) {
 		if (usage?.output) {
 			preciseOutput += usage.output;
 			hasPrecise = true;
+		}
+		// 累积会话级缓存命中率数据（仅在有值时不展示）
+		if (usage) {
+			if (typeof usage.cacheRead === "number" && usage.cacheRead > 0) sessionCacheRead += usage.cacheRead;
+			if (typeof usage.input === "number" && usage.input > 0) sessionInput += usage.input;
 		}
 	});
 
@@ -366,12 +388,12 @@ export default function (pi: ExtensionAPI) {
 			);
 		}
 
-		// Auto-clear after 10 seconds（用 latestCtx 避免会话切换后 ctx 失效）
+		// Auto-clear after 5 minutes（用 latestCtx 避免会话切换后 ctx 失效）
 		const clearCtx = latestCtx;
 		clearTimer = setTimeout(() => {
 			if (clearCtx) clearCtx.ui.setStatus("token-speed", undefined);
 			clearTimer = null;
-		}, 10000);
+		}, CLEAR_AFTER_MS);
 
 		latestCtx = null;
 	});
@@ -440,6 +462,13 @@ export default function (pi: ExtensionAPI) {
 
 		const details = (event.result as { details?: SubagentDetailsLike } | undefined)?.details;
 		subStats = collectStats(details);
+		// 子代理收尾时一次性累积缓存消费到会话级命中率（避免 update 多触发重复计数）
+		for (const result of details?.results ?? []) {
+			const usage = result.usage;
+			if (!usage) continue;
+			if (typeof usage.cacheRead === "number" && usage.cacheRead > 0) sessionCacheRead += usage.cacheRead;
+			if (typeof usage.input === "number" && usage.input > 0) sessionInput += usage.input;
+		}
 
 		const theme = ctx.ui.theme;
 		const { count, precise } = getSubTokenCount(subStats);
@@ -454,16 +483,16 @@ export default function (pi: ExtensionAPI) {
 			"token-speed",
 			theme.fg(
 				color,
-				`${prefix} 子代理${subAgentLabel(subStats.agents)} ${fmtTokens(count)} tok @ ${speed} t/s (${elapsedSec.toFixed(1)}s)${ttfb}`,
+				`${prefix} 子代理${subAgentLabel(subStats.agents)} ${fmtTokens(count)} tok @ ${speed} t/s (${elapsedSec.toFixed(1)}s)${ttfb}${cacheHitSuffix()}`,
 			),
 		);
 
-		// Auto-clear after 10 seconds（用 subLatestCtx 避免会话切换后 ctx 失效）
+		// Auto-clear after 5 minutes（用 subLatestCtx 避免会话切换后 ctx 失效）
 		const clearCtx = subLatestCtx;
 		subClearTimer = setTimeout(() => {
 			if (clearCtx) clearCtx.ui.setStatus("token-speed", undefined);
 			subClearTimer = null;
-		}, 10000);
+		}, CLEAR_AFTER_MS);
 
 		subLatestCtx = null;
 	});
