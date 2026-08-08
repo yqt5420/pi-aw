@@ -45,9 +45,11 @@ function countCJK(s: string): number {
 }
 /** 主 agent 实时速度刷新周期（ms）。有 delta 时即时刷新，此为主 agent
  * 无新 token 时的兜底心跳（覆盖 thinking 停顿期），避免空转。 */
-const MAIN_HEARTBEAT_MS = 500;
+const MAIN_HEARTBEAT_MS = 200;
 /** 子代理心率刷新周期（ms） */
-const SUB_HEARTBEAT_MS = 250;
+const SUB_HEARTBEAT_MS = 150;
+/** delta 即时刷新的最小节流间隔（ms）：防止 token 极密时过度刷新 */
+const DELTA_THROTTLE_MS = 50;
 /** 防零除/初始缓冲的最短耗时（s），低于此显示 ... */
 const MIN_SPEED_ELAPSED_S = 0.05;
 /** 汇总展示后自动清除的时长（5 分钟） */
@@ -63,6 +65,7 @@ export default function (pi: ExtensionAPI) {
 	let thinkingCharCount = 0;
 	let toolCallCharCount = 0;
 	let cjkCharCount = 0;
+	let lastDeltaRefresh = 0;
 	let preciseOutput = 0;
 	let hasPrecise = false;
 	let isStreaming = false;
@@ -342,6 +345,7 @@ export default function (pi: ExtensionAPI) {
 		thinkingCharCount = 0;
 		toolCallCharCount = 0;
 		cjkCharCount = 0;
+		lastDeltaRefresh = 0;
 		hasPrecise = false;
 		preciseOutput = 0;
 		isStreaming = true;
@@ -409,8 +413,12 @@ export default function (pi: ExtensionAPI) {
 			cjkCharCount += countCJK(ev.delta);
 		}
 
-		// 有增量文本时立即刷新，让速度跟手（避免等待 500ms 心跳）
-		updateStatus();
+		// 有增量文本时立即刷新，让速度跟手（节流防过刷，避免等待心跳）
+		const now = Date.now();
+		if (!lastDeltaRefresh || now - lastDeltaRefresh >= DELTA_THROTTLE_MS) {
+			lastDeltaRefresh = now;
+			updateStatus();
+		}
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
