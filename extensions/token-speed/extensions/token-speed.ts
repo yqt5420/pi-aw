@@ -23,11 +23,19 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 const SUBAGENT_TOOLS = new Set(["subagent", "subagent_consult"]);
 /** 非 CJK 字符≈token 估算：英文约 4 字符/token */
 const APPROX_CHARS_PER_TOKEN = 4;
-/** CJK 字符范围：基本区 + 扩展 A + 兼容表意 */
+/**
+ * CJK 字符范围：基本区 + 扩展 A + 扩展 B~E + 兼容表意。
+ * 说明：单个汉字在主流 tokenizer 中通常 ≈1 token 甚至更高，不能套用 /4；
+ * 未覆盖到的扩展 B~E 生僻字、以及 emoji 等非 BMP 字符会按非 CJK /4 回退
+ *（轻微低估，对终端展示可接受）。
+ */
 const CJK_CODEPOINT_RANGES: Array<[number, number]> = [
-	[0x3400, 0x4dbf],
-	[0x4e00, 0x9fff],
-	[0xf900, 0xfaff],
+	[0x3400, 0x4dbf], // 扩展 A
+	[0x4e00, 0x9fff], // 基本区
+	[0xf900, 0xfaff], // 兼容表意
+	[0x20000, 0x2a6df], // 扩展 B
+	[0x2a700, 0x2ebef], // 扩展 C / D / E
+	[0x2f800, 0x2fa1f], // 兼容表意补充
 ];
 /** 统计字符串中的 CJK（中文/日韩汉字）字符数。一个汉字通常≈1 token，不能套用 /4。 */
 function countCJK(s: string): number {
@@ -54,6 +62,8 @@ const DELTA_THROTTLE_MS = 50;
 const MIN_SPEED_ELAPSED_S = 0.05;
 /** 汇总展示后自动清除的时长（5 分钟） */
 const CLEAR_AFTER_MS = 5 * 60 * 1000;
+/** 子代理完成汇总行被主 agent 实时行覆盖前的短暂保留期（ms），避免展示缝隙。 */
+const SUB_SUMMARY_HOLD_MS = 1500;
 
 export default function (pi: ExtensionAPI) {
 	// 主 agent 流式显示状态
@@ -73,12 +83,17 @@ export default function (pi: ExtensionAPI) {
 	let clearTimer: ReturnType<typeof setTimeout> | null = null;
 	let latestCtx: ExtensionContext | null = null;
 
+	/** 子代理完成汇总行的保留截止时间（Date.now），在此之前主 agent 实时行不覆盖。 */
+	let holdSubSummaryUntil = 0;
+
 	// 会话级缓存命中率累积（跨轮跨子代理，仅在有缓存数据时才展示）
 	let sessionCacheRead = 0;
 	let sessionInput = 0;
 
 	// 子代理显示状态
-	let subActive = false;
+	/** 当前在跑的阻塞子代理数。用计数而非单布尔，避免并行/嵌套子代理时
+	 * 先结束的先置 false 把其余在跑子代理的显示提前停掉。 */
+	let subCount = 0;
 	let subStartTime = 0;
 	let subFirstUpdateMs = 0;
 	let subHasFirstUpdate = false;
@@ -86,6 +101,28 @@ export default function (pi: ExtensionAPI) {
 	let subTimer: ReturnType<typeof setInterval> | null = null;
 	let subClearTimer: ReturnType<typeof setTimeout> | null = null;
 	let subLatestCtx: ExtensionContext | null = null;
+	/** 增量统计去重：只对未见过的新 message / usage 计数，避免 update 全量 O(n²) 重算。 */
+	const seenSubMessages = new Set<MessageLike>();
+	const seenSubUsages = new Set<UsageLike>();
+
+	/** 复位子代理显示状态（start/session_shutdown 时调用）。 */
+	function resetSubState(): void {
+		subStartTime = 0;
+		subFirstUpdateMs = 0;
+		subHasFirstUpdate = false;
+		subStats = emptyStats();
+		if (subTimer) {
+			clearInterval(subTimer);
+			subTimer = null;
+		}
+		if (subClearTimer) {
+			clearTimeout(subClearTimer);
+			subClearTimer = null;
+		}
+		subLatestCtx = null;
+		seenSubMessages.clear();
+		seenSubUsages.clear();
+	}
 
 	function getElapsedSec(): number {
 		return (Date.now() - startTime) / 1000;
@@ -138,7 +175,9 @@ export default function (pi: ExtensionAPI) {
 	function updateStatus() {
 		if (!isStreaming || !latestCtx || !enabled) return;
 		// 子代理运行期间暂停主 agent 刷新，避免覆盖子代理速度显示
-		if (subActive) return;
+		if (subCount > 0) return;
+		// 子代理完成汇总行的保留期内不覆盖，避免展示缝隙
+		if (Date.now() < holdSubSummaryUntil) return;
 		const theme = latestCtx.ui.theme;
 		const approxTokens = getApproxTokens();
 		latestCtx.ui.setStatus(
@@ -193,33 +232,45 @@ export default function (pi: ExtensionAPI) {
 		return { output: 0, hasUsage: false, chars: 0, cjk: 0, agents: [] };
 	}
 
-	/** 从 partialResult.details.results 汇总 token 统计 */
-	function collectStats(details: SubagentDetailsLike | undefined): SubStats {
-		const stats = emptyStats();
+	/** 仅对一个 message 的内容做字符/CJK 统计，并原地累加到 stats。 */
+	function countContent(stats: SubStats, message: MessageLike): void {
+		for (const part of message.content ?? []) {
+			if (typeof part.text === "string") {
+				stats.chars += part.text.length;
+				stats.cjk += countCJK(part.text);
+			}
+			if (typeof part.thinking === "string") {
+				stats.chars += part.thinking.length;
+				stats.cjk += countCJK(part.thinking);
+			}
+		}
+	}
+
+	/**
+	 * 增量统计：只对未出现在 seen 集合中的新 message / usage 计数并原地追加
+	 * 到 stats。tool_execution_update 每次会带完整 details，用 seen 去重后
+	 * 每个 message/usage 只处理一次，避免 O(n²) 全量重算。
+	 */
+	function collectIncremental(stats: SubStats, details: SubagentDetailsLike | undefined): void {
 		for (const result of details?.results ?? []) {
 			if (typeof result.agent === "string" && result.agent && !stats.agents.includes(result.agent)) {
 				stats.agents.push(result.agent);
 			}
 			const usage = result.usage;
-			if (usage && typeof usage.output === "number" && usage.output > 0) {
-				stats.output += usage.output;
-				stats.hasUsage = true;
+			if (usage && !seenSubUsages.has(usage)) {
+				seenSubUsages.add(usage);
+				if (typeof usage.output === "number" && usage.output > 0) {
+					stats.output += usage.output;
+					stats.hasUsage = true;
+				}
 			}
 			for (const message of result.messages ?? []) {
 				if (message.role !== "assistant") continue;
-				for (const part of message.content ?? []) {
-					if (typeof part.text === "string") {
-						stats.chars += part.text.length;
-						stats.cjk += countCJK(part.text);
-					}
-					if (typeof part.thinking === "string") {
-						stats.chars += part.thinking.length;
-						stats.cjk += countCJK(part.thinking);
-					}
-				}
+				if (seenSubMessages.has(message)) continue;
+				seenSubMessages.add(message);
+				countContent(stats, message);
 			}
 		}
-		return stats;
 	}
 
 	/** 流式中优先精确值，兜底字符估算 */
@@ -233,7 +284,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function subGetSpeedStr(count: number): string {
-		if (!subActive || count === 0) return "0 t/s";
+		if (subCount === 0 || count === 0) return "0 t/s";
 		const elapsed = subGetElapsedSec();
 		if (elapsed < MIN_SPEED_ELAPSED_S) return "...";
 		return `${(count / elapsed).toFixed(1)} t/s`;
@@ -276,7 +327,6 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function subStopStreaming() {
-		subActive = false;
 		if (subTimer) {
 			clearInterval(subTimer);
 			subTimer = null;
@@ -300,6 +350,20 @@ export default function (pi: ExtensionAPI) {
 
 	// ---------- 生命周期 ----------
 
+	/** 复位主 agent 每轮计数/精确标记（turn_start 与 session_shutdown 共用，避免时序脆弱点）。 */
+	function resetTurnState(): void {
+		startTime = 0;
+		firstTokenTime = 0;
+		hasFirstToken = false;
+		charCount = 0;
+		thinkingCharCount = 0;
+		toolCallCharCount = 0;
+		cjkCharCount = 0;
+		lastDeltaRefresh = 0;
+		preciseOutput = 0;
+		hasPrecise = false;
+	}
+
 	// 清理 timer 和 clearTimer，防止退出时残留
 	pi.on("session_shutdown", async () => {
 		if (timer) {
@@ -310,22 +374,13 @@ export default function (pi: ExtensionAPI) {
 			clearTimeout(clearTimer);
 			clearTimer = null;
 		}
-		if (subTimer) {
-			clearInterval(subTimer);
-			subTimer = null;
-		}
-		if (subClearTimer) {
-			clearTimeout(subClearTimer);
-			subClearTimer = null;
-		}
-
-		// 重置子代理状态，避免上一个被中止（end 被跳过）的残留跨会话带入
-		subActive = false;
-		subLatestCtx = null;
-		// 重置主 agent 流式/精确标记，避免进程级状态跨会话波出
+		// 子代理状态复位（含 seen 集合），避免上一个被中止（end 被跳过）的残留跨会话带入
+		subCount = 0;
+		latestCtx = null;
+		holdSubSummaryUntil = 0;
 		isStreaming = false;
-		hasPrecise = false;
-		preciseOutput = 0;
+		resetTurnState();
+		resetSubState();
 		// 重置会话级缓存累积，避免跨会话带入
 		sessionCacheRead = 0;
 		sessionInput = 0;
@@ -338,18 +393,11 @@ export default function (pi: ExtensionAPI) {
 			clearTimer = null;
 		}
 
+		resetTurnState();
 		startTime = Date.now();
-		firstTokenTime = 0;
-		hasFirstToken = false;
-		charCount = 0;
-		thinkingCharCount = 0;
-		toolCallCharCount = 0;
-		cjkCharCount = 0;
-		lastDeltaRefresh = 0;
-		hasPrecise = false;
-		preciseOutput = 0;
 		isStreaming = true;
 		latestCtx = ctx;
+		holdSubSummaryUntil = 0;
 
 		if (!enabled) return;
 
@@ -373,9 +421,10 @@ export default function (pi: ExtensionAPI) {
 			hasPrecise = true;
 		}
 		// 累积会话级缓存命中率数据（仅在有值时不展示）
-		// 语义:每条 assistant message 的 usage 是单次 provider 请求的完整用量
-		//（含完整 input/cacheRead），跨消息累加即会话真实总计费用量，命中率为
-		// 全会话加权命中率;无需做增量差（若未来 usage 变增量再改为差量）。
+		// 语义：每条 assistant message 的 usage 是单次 provider 请求的完整用量
+		//（含该次请求完整 input/cacheRead），同轮多条 assistant 消息叠加会把共享
+		// 上下文重复计入 input，故 sessionInput 是近似“加权命中率”而非精确费用。
+		// 命中率=cacheRead/(cacheRead+input) 分子分母同比例膨胀，近似加权值仍可用。
 		if (usage) {
 			if (typeof usage.cacheRead === "number" && usage.cacheRead > 0) sessionCacheRead += usage.cacheRead;
 			if (typeof usage.input === "number" && usage.input > 0) sessionInput += usage.input;
@@ -470,68 +519,107 @@ export default function (pi: ExtensionAPI) {
 			subClearTimer = null;
 		}
 
-		subActive = true;
-		subStartTime = Date.now();
-		subFirstUpdateMs = 0;
-		subHasFirstUpdate = false;
-		subStats = emptyStats();
+		if (subCount === 0) {
+			// 首个子代理：初始化计时与状态
+			subStartTime = Date.now();
+			subFirstUpdateMs = 0;
+			subHasFirstUpdate = false;
+			subStats = emptyStats();
+		}
+		subCount++;
 		subLatestCtx = ctx;
 
-		const theme = ctx.ui.theme;
-		const agents = extractAgentNames(event.args);
-		ctx.ui.setStatus(
-			"token-speed",
-			theme.fg("accent", `⚡ 子代理${subAgentLabel(agents)} 启动中...`),
-		);
+		// 只在首个启动时显示“启动中”；并发时保持已有显示
+		if (subCount === 1) {
+			const theme = ctx.ui.theme;
+			const agents = extractAgentNames(event.args);
+			ctx.ui.setStatus(
+				"token-speed",
+				theme.fg("accent", `⚡ 子代理${subAgentLabel(agents)} 启动中...`),
+			);
+		}
 
 		// 心跳刷新：子代理思考/工具执行期间无 message_end 时保持显示。
-		// 先清旧句柄再建，避免并发/嵌套子代理或在途残留把 interval 句柄覆盖泄漏。
+		// 先清旧句柄再建，避免残留把 interval 句柄覆盖泄漏。
 		if (subTimer) {
 			clearInterval(subTimer);
 			subTimer = null;
 		}
 		subTimer = setInterval(() => {
-			if (!subLatestCtx || !subActive) return;
+			if (!subLatestCtx || subCount === 0) return;
 			subUpdateStreaming(subLatestCtx);
 		}, SUB_HEARTBEAT_MS);
+
+		// 子代理运行期间主 agent 不输出，暂停主兜底心跳避免空转（end 时恢复）
+		if (timer) {
+			clearInterval(timer);
+			timer = null;
+		}
 	});
 
 	pi.on("tool_execution_update", async (event, _ctx) => {
 		if (!SUBAGENT_TOOLS.has(event.toolName)) return;
-		if (!enabled || !subActive || !subLatestCtx) return;
+		if (!enabled || subCount === 0 || !subLatestCtx) return;
 
 		const details = (event.partialResult as { details?: SubagentDetailsLike } | undefined)?.details;
-		const stats = collectStats(details);
-		if (stats.agents.length === 0 && stats.output === 0 && stats.chars === 0) return;
+		collectIncremental(subStats, details);
+		if (subStats.agents.length === 0 && subStats.output === 0 && subStats.chars === 0) return;
 
 		if (!subHasFirstUpdate) {
 			subFirstUpdateMs = Date.now() - subStartTime;
 			subHasFirstUpdate = true;
 		}
-		subStats = stats;
 
 		subUpdateStreaming(subLatestCtx);
 	});
 
 	pi.on("tool_execution_end", async (event, ctx) => {
 		if (!SUBAGENT_TOOLS.has(event.toolName)) return;
-		if (!enabled || !subActive) return;
+		if (!enabled || subCount === 0) return;
 
+		subCount--;
+		const isLast = subCount === 0;
+
+		// 若非最后一个（还有并行子代理在跑），保持“流式”子代理显示，仅停心跳刷新由
+		// 剩余子代理接管；不等同地结束显示。
+		if (!isLast) {
+			if (!ctx.hasUI) return;
+			return;
+		}
+
+		// 最后一个子代理结束：停心跳并（若主 agent 仍流式）重建主兜底心跳
 		subStopStreaming();
+		if (ctx.hasUI && timer === null && isStreaming) {
+			timer = setInterval(() => updateStatus(), MAIN_HEARTBEAT_MS);
+		}
 		if (!ctx.hasUI) {
 			subLatestCtx = null;
 			return;
 		}
 
 		const details = (event.result as { details?: SubagentDetailsLike } | undefined)?.details;
-		subStats = collectStats(details);
-		// 子代理收尾时一次性累积缓存消费到会话级命中率（避免 update 多触发重复计数）
+		// 最终汇总：重建一次全量精确统计（end 事件只发生一次，无 O(n²) 问题）
+		const finalStats = emptyStats();
 		for (const result of details?.results ?? []) {
+			if (typeof result.agent === "string" && result.agent && !finalStats.agents.includes(result.agent)) {
+				finalStats.agents.push(result.agent);
+			}
 			const usage = result.usage;
-			if (!usage) continue;
-			if (typeof usage.cacheRead === "number" && usage.cacheRead > 0) sessionCacheRead += usage.cacheRead;
-			if (typeof usage.input === "number" && usage.input > 0) sessionInput += usage.input;
+			if (usage && typeof usage.output === "number" && usage.output > 0) {
+				finalStats.output += usage.output;
+				finalStats.hasUsage = true;
+			}
+			// 子代理收尾时一次性累积缓存消费到会话级命中率（避免 update 多触发重复计数）
+			if (usage) {
+				if (typeof usage.cacheRead === "number" && usage.cacheRead > 0) sessionCacheRead += usage.cacheRead;
+				if (typeof usage.input === "number" && usage.input > 0) sessionInput += usage.input;
+			}
+			for (const message of result.messages ?? []) {
+				if (message.role !== "assistant") continue;
+				countContent(finalStats, message);
+			}
 		}
+		subStats = finalStats;
 
 		const theme = ctx.ui.theme;
 		const { count, precise } = getSubTokenCount(subStats);
@@ -549,6 +637,9 @@ export default function (pi: ExtensionAPI) {
 				`${prefix} 子代理${subAgentLabel(subStats.agents)} ${fmtTokens(count)} tok @ ${speed} t/s (${elapsedSec.toFixed(1)}s)${ttfb}${cacheHitSuffix()}`,
 			),
 		);
+
+		// 短暂保留子代理完成汇总行，避免立即被主 agent 实时行覆盖的展示缝隙
+		holdSubSummaryUntil = Date.now() + SUB_SUMMARY_HOLD_MS;
 
 		// Auto-clear after 5 minutes（用 subLatestCtx 避免会话切换后 ctx 失效）
 		const clearCtx = subLatestCtx;
