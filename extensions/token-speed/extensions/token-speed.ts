@@ -43,8 +43,9 @@ function countCJK(s: string): number {
 	}
 	return n;
 }
-/** 主 agent 实时速度刷新周期（ms） */
-const MAIN_HEARTBEAT_MS = 100;
+/** 主 agent 实时速度刷新周期（ms）。有 delta 时即时刷新，此为主 agent
+ * 无新 token 时的兜底心跳（覆盖 thinking 停顿期），避免空转。 */
+const MAIN_HEARTBEAT_MS = 500;
 /** 子代理心率刷新周期（ms） */
 const SUB_HEARTBEAT_MS = 250;
 /** 防零除/初始缓冲的最短耗时（s），低于此显示 ... */
@@ -407,6 +408,9 @@ export default function (pi: ExtensionAPI) {
 			toolCallCharCount += ev.delta.length;
 			cjkCharCount += countCJK(ev.delta);
 		}
+
+		// 有增量文本时立即刷新，让速度跟手（避免等待 500ms 心跳）
+		updateStatus();
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
