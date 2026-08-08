@@ -1,0 +1,10 @@
+{
+  "pi": { "extensions": ["./index.ts"] },
+  "name": "@juicesharp/rpiv-todo",
+  "version": "2.4.0",
+  "description": "Pi extension. A todo list for the model, rendered as a live overlay that survives /reload and conversation compaction.",
+  "license": "MIT",
+  "author": "juicesharp",
+  "vendorOf": "https://github.com/juicesharp/rpiv-mono/tree/main/packages/rpiv-todo#readme",
+  "vendorNote": "vendored into pi-aw for unified git management + local fixes; upstream updates should be synced manually."
+}
