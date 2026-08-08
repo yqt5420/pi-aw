@@ -111,7 +111,7 @@ export default function (pi: ExtensionAPI) {
 			"token-speed",
 			theme.fg(
 				"accent",
-				`⚡ ${fmtTokens(approxTokens)} tok @ ${getSpeedStr(approxTokens)} | 首 ${fmtTTFB()}`,
+				`⚡ ${fmtTokens(approxTokens)} tok @ ${getSpeedStr(approxTokens)} | 首 ${fmtTTFB()}${cacheHitSuffix()}`,
 			),
 		);
 	}
