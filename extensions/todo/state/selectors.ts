@@ -82,14 +82,10 @@ export function selectOverlayLayout(state: TaskState, budget: number): OverlayLa
 	const nonCompleted = all.filter((t) => t.status !== "completed");
 	const totalCompleted = all.length - nonCompleted.length;
 	if (nonCompleted.length <= innerBudget) {
-		const kept = new Set<Task>(nonCompleted);
-		for (const t of all) {
-			if (kept.size >= innerBudget) break;
-			if (t.status === "completed") kept.add(t);
-		}
-		const visible = all.filter((t) => kept.has(t));
-		const shownCompleted = visible.filter((t) => t.status === "completed").length;
-		return { visible, hiddenCompleted: totalCompleted - shownCompleted, truncatedTail: 0 };
+		// 溢出且未完成任务都能放下：**整段隐藏 completed**，只留 `+N completed` 合计行。
+		// 有限行位应留给当前工作，完成后不再占行；仅当 no overflow（上方 all.length <= budget
+		// 分支）时才按行为 B 全量显示 completed（✓）。避免“一堆完成的占位、新任务被截进 more”。
+		return { visible: nonCompleted, hiddenCompleted: totalCompleted, truncatedTail: 0 };
 	}
 	const visible = nonCompleted.slice(0, innerBudget);
 	const truncatedTail = nonCompleted.length - innerBudget;

@@ -55,15 +55,17 @@ The content-row budget is `maxWidgetLines` (default `12`), and the heading count
 against it. When there are more tasks than fit:
 
 1. one row is reserved for the summary line;
-2. completed tasks are dropped first, newest first — the oldest completed rows
-   are the last completed rows to go;
-3. if the unfinished tasks alone still overflow, the tail of that list is
+2. **completed tasks are dropped entirely first** (not shown, only counted) —
+   the limited rows go to unfinished work, so a wall of done tasks never pushes a
+   new `pending`/`in_progress` task behind `more`;
+3. only if the unfinished tasks alone still overflow is the tail of that list
    truncated;
 4. the last row becomes `+N more (X completed, Y pending)`.
 
-Unfinished work is therefore the last thing to disappear. See
-[configuration.md](./configuration.md#maxwidgetlines) for the budget's floor and
-reload semantics.
+Unfinished work is therefore the last thing to disappear. (When everything fits,
+completed tasks are still shown struck through — the overflow rule above only
+kicks in once space runs out.) See [configuration.md](./configuration.md#maxwidgetlines)
+for the budget's floor and reload semantics.
 
 ## Completed tasks
 
