@@ -6,7 +6,7 @@
  *
  * - Shows live speed during streaming (⚡ 12.5 t/s)
  * - Shows final summary on completion (✓ 512 tok @ 15.3 t/s (33.5s))
- * - Auto-clears after 10 seconds
+ * - Auto-clears after 5 minutes
  *
  * Subagent support (v1.1.0):
  * While a blocking subagent tool (`subagent` / `subagent_consult` from
@@ -22,6 +22,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 const SUBAGENT_TOOLS = new Set(["subagent", "subagent_consult"]);
 const APPROX_CHARS_PER_TOKEN = 4;
+/** 主 agent 实时速度刷新周期（ms） */
+const MAIN_HEARTBEAT_MS = 200;
+/** 子代理心率刷新周期（ms） */
+const SUB_HEARTBEAT_MS = 500;
+/** 防零除/初始缓冲的最短耗时（s），低于此显示 ... */
+const MIN_SPEED_ELAPSED_S = 0.05;
 /** 汇总展示后自动清除的时长（5 分钟） */
 const CLEAR_AFTER_MS = 5 * 60 * 1000;
 
@@ -66,7 +72,7 @@ export default function (pi: ExtensionAPI) {
 	function getSpeedStr(approxTokens: number): string {
 		if (!isStreaming || approxTokens === 0) return "0 t/s";
 		const elapsed = getElapsedSec();
-		if (elapsed < 0.05) return "...";
+		if (elapsed < MIN_SPEED_ELAPSED_S) return "...";
 		return `${(approxTokens / elapsed).toFixed(1)} t/s`;
 	}
 
@@ -94,7 +100,7 @@ export default function (pi: ExtensionAPI) {
 		elapsedSec: number,
 		prefix: string,
 	): string {
-		const speed = tokenCount > 0 ? (elapsedSec < 0.05 ? "..." : (tokenCount / elapsedSec).toFixed(1)) : "0";
+		const speed = tokenCount > 0 ? (elapsedSec < MIN_SPEED_ELAPSED_S ? "..." : (tokenCount / elapsedSec).toFixed(1)) : "0";
 		const ttfb = hasFirstToken
 			? ` | 首 ${(firstTokenTime / 1000).toFixed(1)}s`
 			: "";
@@ -194,7 +200,7 @@ export default function (pi: ExtensionAPI) {
 	function subGetSpeedStr(count: number): string {
 		if (!subActive || count === 0) return "0 t/s";
 		const elapsed = subGetElapsedSec();
-		if (elapsed < 0.05) return "...";
+		if (elapsed < MIN_SPEED_ELAPSED_S) return "...";
 		return `${(count / elapsed).toFixed(1)} t/s`;
 	}
 
@@ -281,6 +287,10 @@ export default function (pi: ExtensionAPI) {
 		// 重置子代理状态，避免上一个被中止（end 被跳过）的残留跨会话带入
 		subActive = false;
 		subLatestCtx = null;
+		// 重置主 agent 流式/精确标记，避免进程级状态跨会话波出
+		isStreaming = false;
+		hasPrecise = false;
+		preciseOutput = 0;
 		// 重置会话级缓存累积，避免跨会话带入
 		sessionCacheRead = 0;
 		sessionInput = 0;
@@ -311,7 +321,7 @@ export default function (pi: ExtensionAPI) {
 			clearInterval(timer);
 			timer = null;
 		}
-		timer = setInterval(() => updateStatus(), 200);
+		timer = setInterval(() => updateStatus(), MAIN_HEARTBEAT_MS);
 
 		const theme = ctx.ui.theme;
 		ctx.ui.setStatus("token-speed", theme.fg("accent", "⚡ ..."));
@@ -326,6 +336,9 @@ export default function (pi: ExtensionAPI) {
 			hasPrecise = true;
 		}
 		// 累积会话级缓存命中率数据（仅在有值时不展示）
+		// 语义:每条 assistant message 的 usage 是单次 provider 请求的完整用量
+		//（含完整 input/cacheRead），跨消息累加即会话真实总计费用量，命中率为
+		// 全会话加权命中率;无需做增量差（若未来 usage 变增量再改为差量）。
 		if (usage) {
 			if (typeof usage.cacheRead === "number" && usage.cacheRead > 0) sessionCacheRead += usage.cacheRead;
 			if (typeof usage.input === "number" && usage.input > 0) sessionInput += usage.input;
@@ -433,7 +446,7 @@ export default function (pi: ExtensionAPI) {
 		subTimer = setInterval(() => {
 			if (!subLatestCtx || !subActive) return;
 			subUpdateStreaming(subLatestCtx);
-		}, 500);
+		}, SUB_HEARTBEAT_MS);
 	});
 
 	pi.on("tool_execution_update", async (event, _ctx) => {
@@ -458,7 +471,10 @@ export default function (pi: ExtensionAPI) {
 		if (!enabled || !subActive) return;
 
 		subStopStreaming();
-		if (!ctx.hasUI) return;
+		if (!ctx.hasUI) {
+			subLatestCtx = null;
+			return;
+		}
 
 		const details = (event.result as { details?: SubagentDetailsLike } | undefined)?.details;
 		subStats = collectStats(details);
@@ -473,7 +489,7 @@ export default function (pi: ExtensionAPI) {
 		const theme = ctx.ui.theme;
 		const { count, precise } = getSubTokenCount(subStats);
 		const elapsedSec = subGetElapsedSec();
-		const speed = elapsedSec < 0.05 ? "..." : count > 0 ? (count / elapsedSec).toFixed(1) : "0";
+		const speed = elapsedSec < MIN_SPEED_ELAPSED_S ? "..." : count > 0 ? (count / elapsedSec).toFixed(1) : "0";
 		const ttfb = subHasFirstUpdate
 			? ` | 首 ${(subFirstUpdateMs / 1000).toFixed(1)}s`
 			: "";
