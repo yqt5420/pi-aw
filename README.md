@@ -16,6 +16,7 @@ git package 声明 `extensions` + `prompts`，跨设备一行 `pi install git:..
 | `extensions/pi-plan-mode-cn` | 只读 `/plan` 协作模式（中文）| [README](extensions/pi-plan-mode-cn/README.md) |
 | `extensions/pi-subagents-cn` | 子代理管理（中文）| [README](extensions/pi-subagents-cn/README.md) |
 | `extensions/pi-goal-cn` | 目标管理（中文）| [README](extensions/pi-goal-cn/README.md) |
+| `extensions/pi-auto-title` | 自动为新会话生成一句话标题，尊重手动 `/name` | [README](extensions/pi-auto-title/README.md) |
 
 > 每个插件的**功能细节、配置方法、命令**见各自目录下的 `README.md`。
 
