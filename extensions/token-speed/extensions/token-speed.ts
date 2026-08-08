@@ -21,7 +21,28 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const SUBAGENT_TOOLS = new Set(["subagent", "subagent_consult"]);
+/** 非 CJK 字符≈token 估算：英文约 4 字符/token */
 const APPROX_CHARS_PER_TOKEN = 4;
+/** CJK 字符范围：基本区 + 扩展 A + 兼容表意 */
+const CJK_CODEPOINT_RANGES: Array<[number, number]> = [
+	[0x3400, 0x4dbf],
+	[0x4e00, 0x9fff],
+	[0xf900, 0xfaff],
+];
+/** 统计字符串中的 CJK（中文/日韩汉字）字符数。一个汉字通常≈1 token，不能套用 /4。 */
+function countCJK(s: string): number {
+	let n = 0;
+	for (const ch of s) {
+		const c = ch.codePointAt(0)!;
+		for (const [lo, hi] of CJK_CODEPOINT_RANGES) {
+			if (c >= lo && c <= hi) {
+				n++;
+				break;
+			}
+		}
+	}
+	return n;
+}
 /** 主 agent 实时速度刷新周期（ms） */
 const MAIN_HEARTBEAT_MS = 200;
 /** 子代理心率刷新周期（ms） */
@@ -40,6 +61,7 @@ export default function (pi: ExtensionAPI) {
 	let charCount = 0;
 	let thinkingCharCount = 0;
 	let toolCallCharCount = 0;
+	let cjkCharCount = 0;
 	let preciseOutput = 0;
 	let hasPrecise = false;
 	let isStreaming = false;
@@ -66,7 +88,9 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function getApproxTokens(): number {
-		return Math.round((charCount + thinkingCharCount + toolCallCharCount) / 4);
+		const totalChars = charCount + thinkingCharCount + toolCallCharCount;
+		// CJK 字符按 1 字≈1 token，其余按 /4 估算
+		return Math.round(cjkCharCount + (totalChars - cjkCharCount) / APPROX_CHARS_PER_TOKEN);
 	}
 
 	function getSpeedStr(approxTokens: number): string {
@@ -157,11 +181,12 @@ export default function (pi: ExtensionAPI) {
 		output: number; // 精确 output tokens 累计
 		hasUsage: boolean; // 是否拿到过非零精确值
 		chars: number; // assistant 消息字符数（估算兜底）
+		cjk: number; // 其中 CJK 字符数（估算更准）
 		agents: string[];
 	}
 
 	function emptyStats(): SubStats {
-		return { output: 0, hasUsage: false, chars: 0, agents: [] };
+		return { output: 0, hasUsage: false, chars: 0, cjk: 0, agents: [] };
 	}
 
 	/** 从 partialResult.details.results 汇总 token 统计 */
@@ -179,8 +204,14 @@ export default function (pi: ExtensionAPI) {
 			for (const message of result.messages ?? []) {
 				if (message.role !== "assistant") continue;
 				for (const part of message.content ?? []) {
-					if (typeof part.text === "string") stats.chars += part.text.length;
-					if (typeof part.thinking === "string") stats.chars += part.thinking.length;
+					if (typeof part.text === "string") {
+						stats.chars += part.text.length;
+						stats.cjk += countCJK(part.text);
+					}
+					if (typeof part.thinking === "string") {
+						stats.chars += part.thinking.length;
+						stats.cjk += countCJK(part.thinking);
+					}
 				}
 			}
 		}
@@ -190,7 +221,7 @@ export default function (pi: ExtensionAPI) {
 	/** 流式中优先精确值，兜底字符估算 */
 	function getSubTokenCount(stats: SubStats): { count: number; precise: boolean } {
 		if (stats.hasUsage) return { count: stats.output, precise: true };
-		return { count: Math.round(stats.chars / APPROX_CHARS_PER_TOKEN), precise: false };
+		return { count: Math.round(stats.cjk + (stats.chars - stats.cjk) / APPROX_CHARS_PER_TOKEN), precise: false };
 	}
 
 	function subGetElapsedSec(): number {
@@ -309,6 +340,7 @@ export default function (pi: ExtensionAPI) {
 		charCount = 0;
 		thinkingCharCount = 0;
 		toolCallCharCount = 0;
+		cjkCharCount = 0;
 		hasPrecise = false;
 		preciseOutput = 0;
 		isStreaming = true;
@@ -361,16 +393,19 @@ export default function (pi: ExtensionAPI) {
 		// Count text tokens (output content)
 		if (ev.type === "text_delta") {
 			charCount += ev.delta.length;
+			cjkCharCount += countCJK(ev.delta);
 		}
 
 		// Count thinking tokens
 		if (ev.type === "thinking_delta") {
 			thinkingCharCount += ev.delta.length;
+			cjkCharCount += countCJK(ev.delta);
 		}
 
 		// Count tool call tokens (e.g. file write content)
 		if (ev.type === "toolcall_delta") {
 			toolCallCharCount += ev.delta.length;
+			cjkCharCount += countCJK(ev.delta);
 		}
 	});
 
