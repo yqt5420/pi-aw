@@ -12,7 +12,7 @@
  * `message_end` runs after).
  */
 
-import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionMode, ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import { COLLAPSE_KEY_OFF, getMaxWidgetLines, resolveCollapseKey } from "./config.js";
 import { formatStatusLabel, t } from "./state/i18n-bridge.js";
@@ -21,6 +21,13 @@ import { getRenderState } from "./state/store.js";
 import { formatOverlayTaskLine } from "./view/format.js";
 
 const WIDGET_KEY = "rpiv-todos";
+
+// pi-web (and generic RPC hosts) render widget lines in a wrapping <pre> with no
+// terminal-width concept, so truncation to a fixed pane width is meaningless. A
+// generous width keeps the TUI-style truncate path effectively a no-op and lets
+// the web host wrap naturally. The row budget (maxWidgetLines) still applies,
+// collapsing deep lists into a "+N more" summary like the TUI overlay.
+const MAX_WEB_WIDGET_WIDTH = 200;
 
 // English fallbacks for localized overlay chrome strings.
 const OVERLAY_HEADING = "Todos";
@@ -33,14 +40,23 @@ export class TodoOverlay {
 	private widgetRegistered = false;
 	private tui: TUI | undefined;
 	private collapsed = false;
+	// The bound host mode: "tui" uses the component-factory widget (render + live
+	// requestRender); every other mode (pi-web drops in as "rpc") only supports
+	// string-array widgets, sent fire-and-forget on each update.
+	private mode: ExtensionMode | undefined;
+	// Last plain lines sent to a non-TUI host, so identical refreshes don't
+	// re-emit a redundant setWidget request.
+	private lastWebLines: string[] | undefined;
 
-	setUICtx(ctx: ExtensionUIContext): void {
+	setUICtx(ctx: ExtensionUIContext, mode?: ExtensionMode): void {
 		// Identity-compare so repeat session_start handlers are idempotent;
 		// on identity change (/reload) invalidate so update() re-registers.
-		if (ctx !== this.uiCtx) {
+		if (ctx !== this.uiCtx || mode !== this.mode) {
 			this.uiCtx = ctx;
+			this.mode = mode ?? "tui";
 			this.widgetRegistered = false;
 			this.tui = undefined;
+			this.lastWebLines = undefined;
 		}
 	}
 
@@ -48,12 +64,27 @@ export class TodoOverlay {
 		if (!this.uiCtx) return;
 		const snapshot = this.getSnapshot();
 		const visible = this.selectOverlayTasks(snapshot);
+		// 行为 B：面板只在存在可执行任务（pending / in_progress）时出现。全部完成、
+		// 或被删除/清空时，整个面板隐藏（deleted/completed 都不算可执行）。
+		const hasActionable = snapshot.tasks.some((t) => t.status === "in_progress" || t.status === "pending");
 
-		if (visible.length === 0) {
+		if (visible.length === 0 || !hasActionable) {
 			if (this.widgetRegistered) {
 				this.uiCtx.setWidget(WIDGET_KEY, undefined);
 				this.widgetRegistered = false;
 				this.tui = undefined;
+				this.lastWebLines = undefined;
+			}
+			return;
+		}
+
+		// Non-TUI host (pi-web / RPC):
+		if (this.mode !== "tui") {
+			const lines = this.renderWidget(this.uiCtx.theme, MAX_WEB_WIDGET_WIDTH);
+			if (!this.widgetRegistered || !arrayEquals(this.lastWebLines, lines)) {
+				this.uiCtx.setWidget(WIDGET_KEY, lines, { placement: "belowEditor" });
+				this.lastWebLines = lines;
+				this.widgetRegistered = true;
 			}
 			return;
 		}
@@ -80,8 +111,7 @@ export class TodoOverlay {
 	}
 
 	resetCompletedDisplayState(): void {
-		// 完成项隐藏逻辑已改为：overlay 一律不渲染 completed 任务（纯从 store 派生，
-		// 不依赖内存态），因此无需重置任何内存集合——reload/compaction 后仍一致。
+		// 完成项与显隐均纯从 store 派生，无需任何内存态重置——reload/压缩后始终一致。
 	}
 
 	hideCompletedTasksFromPreviousTurn(): void {
@@ -106,10 +136,10 @@ export class TodoOverlay {
 	}
 
 	private selectOverlayTasks(snapshot: ReturnType<TodoOverlay["getSnapshot"]>) {
-		// completed 与 deleted 一律不渲染（不依赖任何跨轮内存态，reload/压缩后仍稳定）。
-		return snapshot.tasks.filter(
-			(task) => task.status !== "deleted" && task.status !== "completed",
-		);
+		// 显示 pending / in_progress / completed，仅隐藏 deleted。completed 由
+		// formatOverlayTaskLine 渲染为 ✓ + 删除线（TUI；web 因纯文本 <pre> 只能显示 ✓）。
+		// 面板整体显隐改由 update() 的 hasActionable 决定，见下。
+		return snapshot.tasks.filter((task) => task.status !== "deleted");
 	}
 
 	private renderWidget(theme: Theme, width: number): string[] {
@@ -192,7 +222,17 @@ export class TodoOverlay {
 		this.widgetRegistered = false;
 		this.tui = undefined;
 		this.uiCtx = undefined;
+		this.mode = undefined;
+		this.lastWebLines = undefined;
 		this.collapsed = false;
 		this.resetCompletedDisplayState();
 	}
+}
+
+/** Shallow array equality for skipping redundant web widget refreshes. */
+function arrayEquals(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+	if (a === b) return true;
+	if (!a || !b || a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+	return true;
 }

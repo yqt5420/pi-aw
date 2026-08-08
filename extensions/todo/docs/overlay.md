@@ -12,7 +12,7 @@ The widget is mounted above the Pi editor under the key `rpiv-todos`.
 | Stage | Condition |
 | --- | --- |
 | Created | At the first session start that has a UI. A headless session never creates it. |
-| Registered | Only while at least one overlay-visible task exists. The widget unregisters itself when the list empties, and re-registers when a task reappears. |
+| Registered | Only while at least one **active** (`pending` or `in_progress`) task exists. The widget auto-hides once every task is completed/deleted; it re-registers when a task becomes active again. |
 | Bound | Only the foreground session's overlay is refreshed. A detached or child session has its own task state and never rebinds or repaints the foreground panel. |
 | Disposed | On the foreground session's shutdown. A child session shutting down leaves the overlay alone. |
 
@@ -65,12 +65,9 @@ Unfinished work is therefore the last thing to disappear. See
 [configuration.md](./configuration.md#maxwidgetlines) for the budget's floor and
 reload semantics.
 
-## Completed tasks fading out
+## Completed tasks
 
-A completed task stays on screen for the remainder of the turn in which it was
-completed. At the start of the next agent turn, every completed row that has
-already been displayed is hidden from later renders. Reloading or compacting the
-session resets that tracking, so a fresh session shows the full list again.
+Completed (and `deleted`) tasks never cause the overlay to appear on their own: the panel only shows while at least one `pending`/`in_progress` task exists. Inside a visible panel, **completed tasks are still shown** (they are not hidden) so you can see what has been done — rendered dim and struck through with a `✓` glyph, matching the anatomy above. Everything derives from the current store at render time, so `/reload` and compaction never resurrect hidden rows and never change what is displayed.
 
 ## Collapsing
 

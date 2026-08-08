@@ -19,7 +19,7 @@
  * correctly after upgrade.
  */
 
-import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionMode, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { COLLAPSE_KEY_OFF, resolveCollapseKey } from "./config.js";
 import { I18N_NAMESPACE } from "./state/i18n-bridge.js";
@@ -130,6 +130,10 @@ export default function (pi: ExtensionAPI, importOverlay: TodoOverlayImporter = 
 	let todoOverlay: TodoOverlay | undefined;
 	const loadTodoOverlay = makeTodoOverlayLoader(importOverlay);
 	let uiCtx: ExtensionUIContext | undefined;
+	// The host UI mode, captured at session_start. pi-web (and generic RPC clients)
+	// bind extensions as "rpc": their setWidget only accepts string arrays and
+	// ignores component factories, so the overlay must render plain lines there.
+	let runMode: ExtensionMode = "tui";
 	let lifecycleGeneration = 0;
 
 	async function updateTodoOverlay(
@@ -143,7 +147,7 @@ export default function (pi: ExtensionAPI, importOverlay: TodoOverlayImporter = 
 		if (generation !== lifecycleGeneration || !uiCtx) return;
 
 		todoOverlay ??= new TodoOverlay();
-		todoOverlay.setUICtx(uiCtx);
+		todoOverlay.setUICtx(uiCtx, runMode);
 		if (resetCompletedDisplayState) todoOverlay.resetCompletedDisplayState();
 		todoOverlay.update();
 	}
@@ -193,6 +197,7 @@ export default function (pi: ExtensionAPI, importOverlay: TodoOverlayImporter = 
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
+		runMode = ctx.mode;
 		let id: string;
 		try {
 			id = sid(ctx);
