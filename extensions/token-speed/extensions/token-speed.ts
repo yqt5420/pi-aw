@@ -60,6 +60,10 @@ const SUB_HEARTBEAT_MS = 150;
 const DELTA_THROTTLE_MS = 50;
 /** 防零除/初始缓冲的最短耗时（s），低于此显示 ... */
 const MIN_SPEED_ELAPSED_S = 0.05;
+/** 实时速度滑动窗口（ms）：用最近窗口内增量算瞬时速率，而非全量平均 */
+const SPEED_WINDOW_MS = 1500;
+/** 窗口增量至少需要的时间跨度（ms），过小则回退全量平均，避免抖动 */
+const MIN_WINDOW_DELTA_MS = 500;
 /** 汇总展示后自动清除的时长（5 分钟） */
 const CLEAR_AFTER_MS = 5 * 60 * 1000;
 /** 子代理完成汇总行被主 agent 实时行覆盖前的短暂保留期（ms），避免展示缝隙。 */
@@ -82,6 +86,8 @@ export default function (pi: ExtensionAPI) {
 	let timer: ReturnType<typeof setInterval> | null = null;
 	let clearTimer: ReturnType<typeof setTimeout> | null = null;
 	let latestCtx: ExtensionContext | null = null;
+	/** 主 agent 实时速度采样点 [timeMs, tokenCount]，用于滑动窗口瞬时速率 */
+	let mainSamples: Array<[number, number]> = [];
 
 	/** 子代理完成汇总行的保留截止时间（Date.now），在此之前主 agent 实时行不覆盖。 */
 	let holdSubSummaryUntil = 0;
@@ -104,6 +110,8 @@ export default function (pi: ExtensionAPI) {
 	/** 增量统计去重：只对未见过的新 message / usage 计数，避免 update 全量 O(n²) 重算。 */
 	const seenSubMessages = new Set<MessageLike>();
 	const seenSubUsages = new Set<UsageLike>();
+	/** 子代理实时速度采样点 [timeMs, tokenCount]，用于滑动窗口瞬时速率 */
+	let subSamples: Array<[number, number]> = [];
 
 	/** 复位子代理显示状态（start/session_shutdown 时调用）。 */
 	function resetSubState(): void {
@@ -122,6 +130,7 @@ export default function (pi: ExtensionAPI) {
 		subLatestCtx = null;
 		seenSubMessages.clear();
 		seenSubUsages.clear();
+		subSamples = [];
 	}
 
 	function getElapsedSec(): number {
@@ -134,12 +143,38 @@ export default function (pi: ExtensionAPI) {
 		return Math.round(cjkCharCount + (totalChars - cjkCharCount) / APPROX_CHARS_PER_TOKEN);
 	}
 
+	/**
+	 * 采样并返回滑动窗口瞬时速率（token/s）。
+	 * 只在窗口跨度 >= MIN_WINDOW_DELTA_MS 且 token 有增量时返回瞬时值；
+	 * 否则返回 null（由调用方回退全量平均，避免起步/无进展时的抖动）。
+	 */
+	function windowedSpeed(
+		samples: Array<[number, number]>,
+		nowMs: number,
+		count: number,
+	): number | null {
+		// 追加采样点
+		samples.push([nowMs, count]);
+		const cutoff = nowMs - SPEED_WINDOW_MS;
+		while (samples.length > 0 && samples[0][0] < cutoff) samples.shift();
+		if (samples.length < 2) return null;
+		const [t0, c0] = samples[0];
+		const [t1, c1] = samples[samples.length - 1];
+		const spanMs = t1 - t0;
+		const delta = c1 - c0;
+		if (spanMs < MIN_WINDOW_DELTA_MS || delta <= 0) return null;
+		return (delta / spanMs) * 1000;
+	}
+
 	function getSpeedStr(approxTokens: number): string {
 		if (!isStreaming || approxTokens === 0) return "0 t/s";
 		const elapsed = getElapsedSec();
 		if (elapsed < MIN_SPEED_ELAPSED_S) return "...";
-		return `${(approxTokens / elapsed).toFixed(1)} t/s`;
+		const rate = windowedSpeed(mainSamples, Date.now(), approxTokens);
+		return `${(rate ?? approxTokens / elapsed).toFixed(1)} t/s`;
 	}
+
+
 
 	function fmtTokens(n: number): string {
 		if (!Number.isFinite(n) || n <= 0) return "0";
@@ -287,7 +322,8 @@ export default function (pi: ExtensionAPI) {
 		if (subCount === 0 || count === 0) return "0 t/s";
 		const elapsed = subGetElapsedSec();
 		if (elapsed < MIN_SPEED_ELAPSED_S) return "...";
-		return `${(count / elapsed).toFixed(1)} t/s`;
+		const rate = windowedSpeed(subSamples, Date.now(), count);
+		return `${(rate ?? count / elapsed).toFixed(1)} t/s`;
 	}
 
 	function subAgentLabel(agents: string[]): string {
@@ -362,6 +398,7 @@ export default function (pi: ExtensionAPI) {
 		lastDeltaRefresh = 0;
 		preciseOutput = 0;
 		hasPrecise = false;
+		mainSamples = [];
 	}
 
 	// 清理 timer 和 clearTimer，防止退出时残留
@@ -525,6 +562,7 @@ export default function (pi: ExtensionAPI) {
 			subFirstUpdateMs = 0;
 			subHasFirstUpdate = false;
 			subStats = emptyStats();
+			subSamples = [];
 		}
 		subCount++;
 		subLatestCtx = ctx;
