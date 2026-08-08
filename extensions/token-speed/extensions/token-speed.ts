@@ -44,9 +44,9 @@ function countCJK(s: string): number {
 	return n;
 }
 /** 主 agent 实时速度刷新周期（ms） */
-const MAIN_HEARTBEAT_MS = 200;
+const MAIN_HEARTBEAT_MS = 100;
 /** 子代理心率刷新周期（ms） */
-const SUB_HEARTBEAT_MS = 500;
+const SUB_HEARTBEAT_MS = 250;
 /** 防零除/初始缓冲的最短耗时（s），低于此显示 ... */
 const MIN_SPEED_ELAPSED_S = 0.05;
 /** 汇总展示后自动清除的时长（5 分钟） */
