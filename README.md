@@ -9,7 +9,7 @@ git package 声明 `extensions` + `prompts`，跨设备一行 `pi install git:..
 | 目录 | 一句话 | 详细文档 |
 |------|--------|:--:|
 | `extensions/vision-router` | 视觉通道自动维护与智能路由，让任何模型都能识图 | [README](extensions/vision-router/README.md) |
-| `extensions/token-speed` | 实时显示 token 生成速度（TTFT + tokens/sec）| [README](extensions/token-speed/README.md) |
+| `extensions/token-speed` | 实时显示 token 生成速度（TTFT + tokens/sec）+ 缓存命中率 + 子代理支持，CJK 感知估算 | [README](extensions/token-speed/README.md) |
 | `extensions/todo` | 模型 todo 实时 overlay，随 /reload 存活（vendored from rpiv-todo + 修复）| [README](extensions/todo/README.md) |
 | `extensions/tdai-memory` | MemoryCore 长期记忆（L0~L3、团队技能库、知识库）| [README](extensions/tdai-memory/README.md) |
 | `extensions/pi-newapi` | 自动发现 NewAPI 网关模型并用 models.dev 补全上下文窗口 | [README](extensions/pi-newapi/README.md) |
