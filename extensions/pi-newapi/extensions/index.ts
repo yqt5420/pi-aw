@@ -47,6 +47,8 @@ function agentDir(): string {
 
 const CACHE_PATH = join(agentDir(), "newapi-models-cache.json");
 const CONFIG_PATH = join(agentDir(), "newapi-config.json");
+/** 自动维护的 pi 模型清单（见 writeModelsJson / WriteModelsSchema）。 */
+const MODELS_JSON_PATH = join(agentDir(), "models.json");
 
 interface NewApiConfig {
   /** Gateway base URL, e.g. https://your-gateway.example/v1 */
@@ -163,6 +165,39 @@ function writeCache(c: CachedCatalog): void {
 /** Name patterns for non-chat models we should not register (image / audio / embedding generators). */
 const NON_CHAT = /embedding|dall-?e|\btts\b|\bwhisper\b|suno|stable-?diffusion|midjourney|imagen|bge-|e5-|rerank|moderation/i;
 
+/**
+ * 生成可区分、可读的展示名：以 pi 内置目录的漂亮名为基底（只是为了承载思考强度与
+ * 展示名），再按网关 id 的变体特征追加标记，避免多个变体（pool-* / 日期后缀）
+ * 归一成同一个名字——那样在模型列表里分不清彼此。
+ *   - `pool-` 前缀   → 追加 `(Pool)`
+ *   - 日期/版本后缀（如 -0731）→ 追加 `(0731)`
+ *   - 没有任何变体标记的规范名 → 直接用基底名
+ * 内置目录未命中时，把网关 id 可读化（去 pool-、分隔符空格化、首字母大写）兜底。
+ */
+function displayName(id: string, bi: BuiltinMeta | undefined): string {
+  const dateTail = (raw: string): string | undefined => {
+    const m = raw.match(/-([0-9]{4,}(?:-[0-9]+)*)$/);
+    if (!m) return undefined;
+    // 只有 >=4 位数字（日期/临时代号）才算后缀；gemini-2-5 等 1 位不算。
+    return m[1].replace(/-/g, "").length >= 4 ? m[1] : undefined;
+  };
+  const pool = /^pool-/i.test(id);
+  const tail = dateTail(id);
+  if (bi?.name) {
+    const parts: string[] = [bi.name];
+    if (pool) parts.push("(Pool)");
+    if (tail) parts.push(`(${tail})`);
+    return parts.join(" ");
+  }
+  // 兜底：id 可读化
+  let base = /^pool-/i.test(id) ? id.slice(5) : id;
+  base = base.replace(/[_-]+/g, " ").trim().replace(/(^|\s)([a-z])/g, (_, s, c) => s + c.toUpperCase());
+  const parts: string[] = [base];
+  if (pool) parts.unshift("(Pool)");
+  if (tail) parts.push(`(${tail})`);
+  return parts.join(" ");
+}
+
 /** Build a pi ProviderModelConfig from a pricing entry + pi built-in metadata. */
 function buildModelConfig(
   entry: NewApiPricingEntry,
@@ -198,7 +233,7 @@ function buildModelConfig(
 
   return {
     id,
-    name: bi?.name ?? id,
+    name: displayName(id, bi),
     reasoning,
     input,
     cost,
@@ -282,16 +317,79 @@ function buildModels(
   source: Map<string, string>,
 ): ReturnType<typeof buildModelConfig>[] {
   const seen = new Map<string, ReturnType<typeof buildModelConfig>>();
+  const usedNames = new Set<string>();
   for (const entry of entries) {
     // Skip embedding / non-chat models (e.g. gemini-embedding-*, dall-e, tts, …).
     if (NON_CHAT.test(entry.model_name)) continue;
     const bi = lookupBuiltin(entry.model_name);
     const cfg = buildModelConfig(entry, groupRatio, bi);
     source.set(entry.model_name, bi ? "builtin" : "heuristic");
+    // 保证展示名在列表内唯一：冲突时追加序号。
+    let name = cfg.name as string;
+    if (usedNames.has(name)) {
+      let n = 2;
+      while (usedNames.has(`${name} (${n})`)) n++;
+      name = `${name} (${n})`;
+    }
+    usedNames.add(name);
+    const finalCfg = { ...cfg, name };
     // 同一 id 在 /api/pricing 里可能因 endpoint 类型不同出现多条——保留第一条。
-    if (!seen.has(entry.model_name)) seen.set(entry.model_name, cfg);
+    if (!seen.has(entry.model_name)) seen.set(entry.model_name, finalCfg);
   }
   return [...seen.values()];
+}
+
+/**
+ * 把当前整理的模型清单原子写入 ~/.pi/agent/models.json（pi 原生配置文件名，
+ * 与 ModelConfigSchema 兼容）。这样 pi / 任何读 models.json 的终端/web 都能拿到
+ * 一份稳定、可区分、思考强度正确的模型清单，而不是每次依赖插件动态发现的原始名。
+ * 该文件由插件自动维护：每次启动（有缓存）与每次刷新目录后都会重写。
+ */
+function writeModelsJson(
+  models: ReturnType<typeof buildModelConfig>[],
+  baseUrl: string,
+  apiKey: string | undefined,
+): void {
+  if (!models.length) return;
+  const providerModels = models.map((m) => ({
+    id: m.id,
+    name: m.name,
+    ...(m.reasoning !== undefined ? { reasoning: m.reasoning } : {}),
+    ...(m.input?.length ? { input: m.input } : {}),
+    ...(m.cost ? { cost: m.cost } : {}),
+    ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
+    ...(m.maxTokens ? { maxTokens: m.maxTokens } : {}),
+    ...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
+    ...(m.compat && Object.keys(m.compat).length ? { compat: m.compat } : {}),
+  }));
+  const payload = {
+    providers: {
+      [PROVIDER_ID]: {
+        name: "NewAPI Gateway",
+        baseUrl,
+        api: "openai-completions",
+        authHeader: true,
+        ...(apiKey ? { apiKey } : {}),
+        models: providerModels,
+      },
+    },
+  };
+  try {
+    mkdirSync(agentDir(), { recursive: true });
+    // 原子写：tmp + rename，避免进程中断留下半截 JSON。
+    const tmpPath = `${MODELS_JSON_PATH}.tmp.${process.pid}.${Date.now()}`;
+    writeFileSync(tmpPath, JSON.stringify(payload, null, 2) + "\n", "utf-8");
+    renameSync(tmpPath, MODELS_JSON_PATH);
+  } catch {
+    /* 写 models.json 失败不影响模型发现本身 */
+  }
+}
+
+/**
+ * 供 /newapi-list 展示的摘要（不展开全部模型信息，避免提示过长）。
+ */
+function summarizeModels(models: ReturnType<typeof buildModelConfig>[]): string {
+  return models.map((m) => `${m.id} → ${m.name}`).join(", ");
 }
 
 export default async function (pi: ExtensionAPI) {
@@ -377,8 +475,10 @@ export default async function (pi: ExtensionAPI) {
   });
 
   pi.registerProvider(PROVIDER_ID, providerConfig());
+  // 启动不等待网络：先把缓存整理出的清单同步维护进 models.json（若已有模型）。
+  if (models.length) writeModelsJson(models, baseUrl, apiKey);
 
-  // 共享的刷新逻辑：拉取目录 → 用最新结果替换注册。启动与 /newapi-refresh 都复用它。
+  // 共享的刷新逻辑：拉取目录 → 用最新结果替换注册，并同步维护 models.json。启动与 /newapi-refresh 都复用它。
   const refreshCatalog = async (): Promise<void> => {
     try {
       const catalog = await fetchCatalog(baseUrl);
@@ -386,6 +486,7 @@ export default async function (pi: ExtensionAPI) {
         modelSource.clear();
         models = buildModels(catalog.entries, catalog.groupRatio, modelSource);
         pi.registerProvider(PROVIDER_ID, providerConfig());
+        writeModelsJson(models, baseUrl, apiKey);
       }
     } catch (err) {
       fetchError = err instanceof Error ? err.message : String(err);
@@ -435,13 +536,25 @@ export default async function (pi: ExtensionAPI) {
       ctx.ui.notify("newapi：正在刷新模型目录…", "info");
       try {
         await refreshCatalog();
-        ctx.ui.notify(`newapi：已刷新，共 ${models.length} 个模型`, "info");
+        ctx.ui.notify(`newapi：已刷新，共 ${models.length} 个模型（已同步维护 models.json）\n${summarizeModels(models)}`, "info");
       } catch (err) {
         ctx.ui.notify(
           `newapi：刷新失败 — ${err instanceof Error ? err.message : String(err)}`,
           "error",
         );
       }
+    },
+  });
+
+  pi.registerCommand("newapi-write-models", {
+    description: "把当前 NewAPI 模型清单重新写入 ~/.pi/agent/models.json（自动维护，一般不必手动）。",
+    async handler(_args, ctx) {
+      if (!models.length) {
+        ctx.ui.notify("newapi：暂无模型 — 请先用 /newapi-refresh 成功拉取后再试", "warning");
+        return;
+      }
+      writeModelsJson(models, baseUrl, apiKey);
+      ctx.ui.notify(`newapi：已写入 models.json，共 ${models.length} 个模型`, "info");
     },
   });
 
