@@ -67,7 +67,7 @@ reload semantics.
 
 ## Completed tasks
 
-Completed (and `deleted`) tasks never cause the overlay to appear on their own: the panel only shows while at least one `pending`/`in_progress` task exists. Inside a visible panel, **completed tasks are still shown** (they are not hidden) so you can see what has been done — rendered dim and struck through with a `✓` glyph, matching the anatomy above. Everything derives from the current store at render time, so `/reload` and compaction never resurrect hidden rows and never change what is displayed.
+Completed (and `deleted`) tasks never cause the overlay to appear on their own: the panel only shows while at least one `pending`/`in_progress` task exists. Inside a visible panel, **completed tasks are still shown** (they are not hidden) so you can see what has been done — rendered dim and struck through with a `✓` glyph, matching the anatomy above. (In pi-web the widget is a plain-text `<pre>`, so only the `✓` shows — real strikethrough is TUI-only.) Everything derives from the current store at render time, so `/reload` and compaction never resurrect hidden rows and never change what is displayed.
 
 ## Collapsing
 

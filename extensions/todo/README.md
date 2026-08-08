@@ -5,7 +5,7 @@ Model todo list（实时 overlay，随 /reload 与对话压缩存活）。为 [@
 ## 功能
 
 - `todo` 工具：Agent 维护任务列表（create / complete / update / delete / blockedBy 依赖）
-- **实时 overlay**：输入框上方常驻显示 Todo 面板（可折叠），头行显示 `(完成/总数)`；`completed` 任务以 `✓`+删除线显示，面板只在存在 `pending`/`in_progress` 任务时出现（全部完成则整体隐藏）
+- **实时 overlay**：输入框上方常驻显示 Todo 面板（可折叠），头行显示 `(完成/总数)`；`completed` 任务以 `✓`+删除线显示，面板只在存在 `pending`/`in_progress` 任务时出现（全部完成则整体隐藏）。注：pi-web 等 web 端的 widget 是纯文本 `<pre>`，completed 只显示 `✓` 勾选、无删除线（真删除线仅在 TUI 生效）
 - 状态随 `/reload`、conversation compaction 存活（从对话分支 replay 恢复）
 
 ## 命令

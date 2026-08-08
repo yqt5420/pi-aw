@@ -110,19 +110,11 @@ export class TodoOverlay {
 		}
 	}
 
-	resetCompletedDisplayState(): void {
-		// 完成项与显隐均纯从 store 派生，无需任何内存态重置——reload/压缩后始终一致。
-	}
-
-	hideCompletedTasksFromPreviousTurn(): void {
-		// 同理：completed 任务在渲染时直接过滤，无“跨轮隐藏”状态机。
-	}
-
 	toggleCollapse(): void {
 		this.collapsed = !this.collapsed;
 		// Forced full redraw on the collapsed↔expanded height step, mirroring the
 		// lane-dock's requestRender(shapeChanged); distinct from the non-forced
-		// requestRender() refresh paths in update()/hideCompletedTasksFromPreviousTurn().
+		// requestRender() refresh path in update().
 		this.tui?.requestRender(true);
 	}
 
@@ -225,7 +217,6 @@ export class TodoOverlay {
 		this.mode = undefined;
 		this.lastWebLines = undefined;
 		this.collapsed = false;
-		this.resetCompletedDisplayState();
 	}
 }
 
