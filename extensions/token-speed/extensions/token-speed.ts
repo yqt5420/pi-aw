@@ -86,7 +86,7 @@ export default function (pi: ExtensionAPI) {
 		const total = sessionCacheRead + sessionInput;
 		if (sessionCacheRead <= 0 || total <= 0) return "";
 		const pct = Math.round((sessionCacheRead / total) * 100);
-		return ` | 缓存 ${pct}% (${fmtTokens(sessionCacheRead)}读)`;
+		return ` | 缓${pct}%`;
 	}
 
 	function buildLabel(
