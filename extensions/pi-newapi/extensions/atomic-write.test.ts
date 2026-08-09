@@ -6,7 +6,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readdirSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeJsonAtomic } from "./atomic-write.ts";
@@ -25,6 +25,23 @@ test("成功写入：内容落地、无 .tmp 孤儿", async () => {
     assert.equal(leftoverTmp(dir).length, 0, "不应遗留 .tmp 临时文件");
     const parsed = JSON.parse(readFileSync(target, "utf-8"));
     assert.equal(parsed.providers.newapi.models.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("父目录创建失败（mkdir 报错）：返回 false、不抛异常、无 .tmp 孤儿", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-aw-test-"));
+  // 用普通文件占位，使 dirname 的 mkdir 遭遇 ENOTDIR（父路径被文件挡住）→ 逼 mkdir 失败
+  const blocker = join(dir, "not-a-dir");
+  writeFileSync(blocker, "x");
+  const target = join(blocker, "sub", "models.json");
+  try {
+    // 必须返回 false 而非抛错（历史 bug：mkdir 在 try 外直接漏到上层）
+    await assert.doesNotReject(async () => {
+      const ok = await writeJsonAtomic(target, { a: 1 }, true);
+      assert.equal(ok, false, "mkdir 失败时应返回 false");
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

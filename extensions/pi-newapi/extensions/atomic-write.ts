@@ -44,12 +44,14 @@ export async function writeJsonAtomic(
   data: unknown,
   trailingNewline: boolean,
 ): Promise<boolean> {
-  mkdirSync(dirname(path), { recursive: true });
   const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}.${Math.random()
     .toString(36)
     .slice(2, 8)}`;
   let lastErr: unknown;
   try {
+    // 创建父目录也放进保护圈：失败时和写失败一样走清理 + 返回 false，绝不对外抛错
+    // （避免 /newapi-url 保存、启动后台写等调用路径出现未捕获异常/无声崩溃）。
+    mkdirSync(dirname(path), { recursive: true });
     writeFileSync(
       tmpPath,
       JSON.stringify(data, null, 2) + (trailingNewline ? "\n" : ""),
