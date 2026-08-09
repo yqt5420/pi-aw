@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { currentTokenTotal } from "./accounting.js";
 import type { GoalCommandController } from "./commands.js";
+import { notifyTerminal } from "./errors.js";
 import { type ActiveGoal, loadGoalStateFromSession } from "./persistence.js";
 import { buildGoalPrompt, buildGoalSystemPrompt } from "./prompts.js";
 import { activateQueuedGoal } from "./queue.js";
@@ -59,13 +60,14 @@ export function registerGoalLifecycle(
 			settingsResult.kind === "loaded" ? settingsResult.settings : DEFAULT_GOAL_SETTINGS;
 		runtime.settingsLoadIssue = settingsResult.kind === "invalid" ? settingsResult : undefined;
 		if (settingsResult.kind === "invalid") {
-			ctx.ui.notify(
+			notifyTerminal(
+				ctx.ui,
 				`已忽略 pi-goal 设置：${settingsResult.reason}。正在使用默认设置。`,
 				"warning",
 			);
 		}
 		if (runtime.settings.experimental.goals) {
-			ctx.ui.notify(EXPERIMENTAL_GOALS_WARNING, "warning");
+			notifyTerminal(ctx.ui, EXPERIMENTAL_GOALS_WARNING, "warning");
 		}
 		try {
 			runtime.toolPolicy.prepareSessionStart(
@@ -73,7 +75,11 @@ export function registerGoalLifecycle(
 				previousToolVisibility,
 			);
 		} catch (error) {
-			ctx.ui.notify(`无法恢复始终可见的目标工具：${formatError(error)}`, "error");
+			notifyTerminal(
+				ctx.ui,
+				`无法恢复始终可见的目标工具：${formatError(error)}`,
+				"error",
+			);
 		}
 
 		const loaded = loadGoalStateFromSession(ctx);
@@ -85,7 +91,8 @@ export function registerGoalLifecycle(
 		if (runtime.queueFrozen) {
 			if (runtime.activeGoal) runtime.persistGoal(runtime.activeGoal);
 			ctx.ui.setStatus(STATUS_KEY, "queue off");
-			ctx.ui.notify(
+			notifyTerminal(
+				ctx.ui,
 				"由于 experimental.goals 已禁用，实验性目标队列被冻结。请重新启用它并运行 /reload 以继续，或使用 /goal clear。",
 				"warning",
 			);
@@ -213,10 +220,11 @@ export function registerGoalLifecycle(
 		if (wasPiRetry) return;
 		runtime.clearGoalRecoveryForGoal(runtime.activeGoal.id);
 		runtime.requestContinuation(runtime.activeGoal);
-		// Manual compaction does not emit agent_settled. This common dispatcher is
-		// therefore the narrow fallback; threshold compaction leaves the intent for
-		// agent_settled when Pi is still busy.
-		runtime.dispatchContinuationIfSettled(ctx);
+		// Pi emits session_compact before it clears its manual-compaction controller,
+		// so sendUserMessage still rejects inside this hook even when ctx reports idle.
+		// Defer one task; threshold compaction retains the intent for agent_settled
+		// when Pi is still busy.
+		runtime.scheduleContinuationDispatch(ctx, runtime.activeGoal.id);
 	});
 
 	pi.on("input", (event, ctx) => {
@@ -641,20 +649,23 @@ export function registerGoalLifecycle(
 			? ` (${truncateNotification(assistant.errorMessage)})`
 			: "";
 		if (status === "paused") {
-			ctx.ui.notify(
+			notifyTerminal(
+				ctx.ui,
 				`目标在中断后暂停${details}。运行 /goal resume 继续。`,
 				"warning",
 			);
 			return;
 		}
 		if (status === "usage_limited") {
-			ctx.ui.notify(
+			notifyTerminal(
+				ctx.ui,
 				`目标在提供商用量限制后停止${details}。用量可用时运行 /goal resume。`,
 				"warning",
 			);
 			return;
 		}
-		ctx.ui.notify(
+		notifyTerminal(
+			ctx.ui,
 			`代理错误后目标被阻止${details}。请解决阻塞问题或运行 /goal resume 重试。`,
 			"warning",
 		);

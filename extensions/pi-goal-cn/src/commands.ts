@@ -1,6 +1,6 @@
 import { checkpointGoalActiveTime, currentTokenTotal, formatTokenCount } from "./accounting.js";
 import { validateObjective } from "./command.js";
-import { safeGoalMenuText } from "./menu.js";
+import { notifyTerminal, safeGoalMenuText } from "./errors.js";
 import type { ActiveGoal } from "./persistence.js";
 import { buildGoalPrompt, buildObjectiveUpdatedPrompt, buildResumePrompt } from "./prompts.js";
 import {
@@ -50,7 +50,7 @@ export class GoalCommandController {
 		if (isRequestCurrent && !isRequestCurrent()) return;
 		const validationError = validateObjective(objective);
 		if (validationError) {
-			ctx.ui.notify(validationError, "warning");
+			notifyTerminal(ctx.ui, validationError, "warning");
 			return;
 		}
 
@@ -74,7 +74,7 @@ export class GoalCommandController {
 				`当前目标：${safeGoalMenuText(existingGoal.text, 4_000)}${queuedRemovalPreview}\n\n新目标：${safeGoalMenuText(objective, 4_000)}`,
 			);
 			if (!shouldReplace) {
-				ctx.ui.notify(`目标已保留：${existingGoal.text}`, "info");
+				notifyTerminal(ctx.ui, `目标已保留：${existingGoal.text}`, "info");
 				return;
 			}
 			if (isRequestCurrent && !isRequestCurrent()) return;
@@ -85,7 +85,11 @@ export class GoalCommandController {
 					this.runtime.pendingQueueAction,
 				) !== existingQueueIdentity
 			) {
-				ctx.ui.notify("确认期间目标队列已更改。请重试。", "warning");
+				notifyTerminal(
+					ctx.ui,
+					"确认期间目标队列已更改。请重试。",
+					"warning",
+				);
 				return;
 			}
 		}
@@ -97,7 +101,7 @@ export class GoalCommandController {
 		try {
 			this.runtime.toolPolicy.prepareActivation(this.runtime.settings.toolVisibility, ctx);
 		} catch (error) {
-			ctx.ui.notify(`无法启动 /goal：${formatError(error)}`, "error");
+			notifyTerminal(ctx.ui, `无法启动 /goal：${formatError(error)}`, "error");
 			if (existingGoal?.status === "active") this.runtime.pauseGoalForUnavailableTools(ctx);
 			return;
 		}
@@ -167,7 +171,8 @@ export class GoalCommandController {
 			return;
 		}
 		const automaticLimit = this.runtime.settings.continuationLimits.automaticTurns;
-		ctx.ui.notify(
+		notifyTerminal(
+			ctx.ui,
 			`${existingGoal ? "Goal replaced" : "Goal started"}: ${objective}. ${
 				startedGoal.tokenBudget === undefined
 					? ""
@@ -184,7 +189,7 @@ export class GoalCommandController {
 	async addGoal(objective: string, tokenBudget: number | undefined, ctx: StatusContext) {
 		const validationError = validateObjective(objective);
 		if (validationError) {
-			ctx.ui.notify(validationError, "warning");
+			notifyTerminal(ctx.ui, validationError, "warning");
 			return;
 		}
 		if (!this.runtime.activeGoal) {
@@ -196,7 +201,8 @@ export class GoalCommandController {
 			createQueuedGoal(objective, tokenBudget),
 		);
 		this.runtime.persistGoal(this.runtime.activeGoal);
-		ctx.ui.notify(
+		notifyTerminal(
+			ctx.ui,
 			`目标已添加到第 ${this.runtime.queuedGoals.length + 1} 位：${objective}`,
 			"info",
 		);
@@ -205,7 +211,7 @@ export class GoalCommandController {
 	async prioritizeGoal(objective: string, tokenBudget: number | undefined, ctx: StatusContext) {
 		const validationError = validateObjective(objective);
 		if (validationError) {
-			ctx.ui.notify(validationError, "warning");
+			notifyTerminal(ctx.ui, validationError, "warning");
 			return;
 		}
 		if (!this.runtime.activeGoal) {
@@ -216,7 +222,7 @@ export class GoalCommandController {
 		this.runtime.pendingQueueAction = { kind: "prioritize", objective, tokenBudget };
 		this.runtime.persistGoal(this.runtime.activeGoal);
 		if (ctx.isIdle?.() !== true || hasPendingMessages(ctx)) {
-			ctx.ui.notify(`优先目标已排队，等待 Pi 安定：${objective}`, "info");
+			notifyTerminal(ctx.ui, `优先目标已排队，等待 Pi 安定：${objective}`, "info");
 			return;
 		}
 		await this.dispatchPendingQueueActionIfSettled(ctx);
@@ -225,29 +231,33 @@ export class GoalCommandController {
 	dropLastGoal(ctx: StatusContext) {
 		const currentGoal = this.runtime.activeGoal;
 		if (!currentGoal) {
-			ctx.ui.notify("没有可丢弃的目标。", "info");
+			notifyTerminal(ctx.ui, "没有可丢弃的目标。", "info");
 			return;
 		}
 		const result = dropLastQueuedGoal(currentGoal, this.runtime.queuedGoals);
 		if (!result.goal) {
 			this.runtime.clearActiveGoal(ctx);
-			ctx.ui.notify(`目标已丢弃：${result.removed?.text ?? currentGoal.text}`, "warning");
+			notifyTerminal(
+				ctx.ui,
+				`目标已丢弃：${result.removed?.text ?? currentGoal.text}`,
+				"warning",
+			);
 			return;
 		}
 		this.runtime.queuedGoals = result.queue;
 		this.runtime.persistGoal(result.goal);
-		ctx.ui.notify(`目标已丢弃：${result.removed?.text ?? "未知目标"}`, "warning");
+		notifyTerminal(ctx.ui, `目标已丢弃：${result.removed?.text ?? "未知目标"}`, "warning");
 	}
 
 	async skipGoal(ctx: StatusContext) {
 		const currentGoal = this.runtime.activeGoal;
 		if (!currentGoal) {
-			ctx.ui.notify("没有可跳过的目标。", "info");
+			notifyTerminal(ctx.ui, "没有可跳过的目标。", "info");
 			return;
 		}
 		if (this.runtime.queuedGoals.length === 0) {
 			this.runtime.clearActiveGoal(ctx);
-			ctx.ui.notify(`目标已跳过：${currentGoal.text}。没有剩余目标。`, "warning");
+			notifyTerminal(ctx.ui, `目标已跳过：${currentGoal.text}。没有剩余目标。`, "warning");
 			return;
 		}
 		if (currentGoal.status === "active") this.runtime.recordGoalUsage(currentGoal, ctx);
@@ -262,7 +272,7 @@ export class GoalCommandController {
 			completedText: currentGoal.text,
 		};
 		this.runtime.persistGoal(currentGoal);
-		ctx.ui.notify(`目标跳过已排队，等待 Pi 安定：${currentGoal.text}`, "info");
+		notifyTerminal(ctx.ui, `目标跳过已排队，等待 Pi 安定：${currentGoal.text}`, "info");
 		if (ctx.isIdle?.() === true && !hasPendingMessages(ctx)) {
 			await this.dispatchPendingQueueActionIfSettled(ctx);
 		}
@@ -334,7 +344,8 @@ export class GoalCommandController {
 			: undefined;
 		if (!this.runtime.activeGoal) {
 			this.runtime.clearActiveGoal(ctx);
-			ctx.ui.notify(
+			notifyTerminal(
+				ctx.ui,
 				reason === "complete"
 					? `目标已完成：${previousText}。没有剩余目标。`
 					: `目标已跳过：${previousText}。没有剩余目标。`,
@@ -349,7 +360,8 @@ export class GoalCommandController {
 			if (blocksStaleGoalToolCalls(this.runtime.activeGoal.status)) {
 				this.runtime.blockStaleGoalToolCalls();
 			}
-			ctx.ui.notify(
+			notifyTerminal(
+				ctx.ui,
 				`${reason === "complete" ? "目标已完成" : "目标已跳过"}：${previousText}。下一个目标仍为 ${this.runtime.activeGoal.status}：${this.runtime.activeGoal.text}`,
 				"info",
 			);
@@ -365,7 +377,7 @@ export class GoalCommandController {
 				restoreGoal: this.runtime.activeGoal,
 				abortTurn: false,
 			});
-			ctx.ui.notify(`无法启动下一个 /goal：${formatError(error)}`, "error");
+			notifyTerminal(ctx.ui, `无法启动下一个 /goal：${formatError(error)}`, "error");
 			return false;
 		}
 		const activatedGoal = this.runtime.activeGoal;
@@ -382,13 +394,15 @@ export class GoalCommandController {
 				restoreGoal: activatedGoal,
 				abortTurn: false,
 			});
-			ctx.ui.notify(
+			notifyTerminal(
+				ctx.ui,
 				`下一个目标在提示词交付失败后暂停：${activatedGoal.text}`,
 				"warning",
 			);
 			return false;
 		}
-		ctx.ui.notify(
+		notifyTerminal(
+			ctx.ui,
 			`${reason === "complete" ? "目标已完成" : "目标已跳过"}：${previousText}。已开始下一个目标：${activatedGoal.text}`,
 			"info",
 		);
@@ -396,7 +410,8 @@ export class GoalCommandController {
 	}
 
 	notifyFrozenQueue(ctx: StatusContext) {
-		ctx.ui.notify(
+		notifyTerminal(
+			ctx.ui,
 			"实验性目标队列已冻结。请在 pi-goal.json 中重新启用 experimental.goals 并运行 /reload，或使用 /goal clear。",
 			"warning",
 		);
@@ -404,11 +419,12 @@ export class GoalCommandController {
 
 	pauseGoal(ctx: StatusContext) {
 		if (!this.runtime.activeGoal) {
-			ctx.ui.notify("没有活动目标。", "info");
+			notifyTerminal(ctx.ui, "没有活动目标。", "info");
 			return;
 		}
 		if (this.runtime.activeGoal.status !== "active") {
-			ctx.ui.notify(
+			notifyTerminal(
+				ctx.ui,
 				`目标状态为 ${this.runtime.activeGoal.status}；只有活动目标可以暂停。`,
 				"warning",
 			);
@@ -418,16 +434,17 @@ export class GoalCommandController {
 			kind: "explicit_pause",
 			expectedGoalId: this.runtime.activeGoal.id,
 		});
-		if (stoppedGoal) ctx.ui.notify(`目标已暂停：${stoppedGoal.text}`, "info");
+		if (stoppedGoal) notifyTerminal(ctx.ui, `目标已暂停：${stoppedGoal.text}`, "info");
 	}
 
 	async resumeGoal(ctx: StatusContext) {
 		if (!this.runtime.activeGoal) {
-			ctx.ui.notify("没有活动目标。", "info");
+			notifyTerminal(ctx.ui, "没有活动目标。", "info");
 			return;
 		}
 		if (!isResumableGoalStatus(this.runtime.activeGoal.status)) {
-			ctx.ui.notify(
+			notifyTerminal(
+				ctx.ui,
 				`目标状态为 ${this.runtime.activeGoal.status}；只有已暂停、被阻止、用量受限或预算受限的目标可以恢复。`,
 				"warning",
 			);
@@ -437,7 +454,8 @@ export class GoalCommandController {
 			this.runtime.activeGoal.tokenBudget !== undefined &&
 			this.runtime.activeGoal.tokensUsed >= this.runtime.activeGoal.tokenBudget
 		) {
-			ctx.ui.notify(
+			notifyTerminal(
+				ctx.ui,
 				`目标 token 预算仍已用完：${formatBudget(this.runtime.activeGoal)}`,
 				"warning",
 			);
@@ -447,7 +465,7 @@ export class GoalCommandController {
 		try {
 			this.runtime.toolPolicy.prepareActivation(this.runtime.settings.toolVisibility, ctx);
 		} catch (error) {
-			ctx.ui.notify(`无法恢复 /goal：${formatError(error)}`, "error");
+			notifyTerminal(ctx.ui, `无法恢复 /goal：${formatError(error)}`, "error");
 			return;
 		}
 		const stoppedGoal = this.runtime.activeGoal;
@@ -462,7 +480,8 @@ export class GoalCommandController {
 		this.runtime.persistGoal(this.runtime.activeGoal);
 		this.runtime.updateStatus(ctx, this.runtime.activeGoal);
 		if (this.runtime.activeGoal.status !== "active") {
-			ctx.ui.notify(
+			notifyTerminal(
+				ctx.ui,
 				`目标 token 预算仍已用完：${formatBudget(this.runtime.activeGoal)}`,
 				"warning",
 			);
@@ -490,7 +509,8 @@ export class GoalCommandController {
 			return;
 		}
 		const automaticLimit = this.runtime.settings.continuationLimits.automaticTurns;
-		ctx.ui.notify(
+		notifyTerminal(
+			ctx.ui,
 			`Goal resumed from ${stoppedStatusLabel(stoppedStatus)}: ${resumedGoal.text}. ${
 				automaticLimit === null
 					? "Automatic work remains Unlimited; goal progress and cumulative usage are preserved."
@@ -502,7 +522,7 @@ export class GoalCommandController {
 
 	clearGoal(ctx: StatusContext) {
 		if (!this.runtime.activeGoal) {
-			ctx.ui.notify("没有活动目标。", "info");
+			notifyTerminal(ctx.ui, "没有活动目标。", "info");
 			this.runtime.cancelContinuationWork();
 			this.runtime.clearGoalRecovery();
 			this.runtime.clearBudgetWrapUp();
@@ -514,17 +534,17 @@ export class GoalCommandController {
 
 		const stoppedGoal = this.runtime.activeGoal.text;
 		this.runtime.clearActiveGoal(ctx);
-		ctx.ui.notify(`目标已清除：${stoppedGoal}`, "warning");
+		notifyTerminal(ctx.ui, `目标已清除：${stoppedGoal}`, "warning");
 	}
 
 	async editGoal(objective: string, tokenBudget: number | undefined, ctx: StatusContext) {
 		const validationError = validateObjective(objective);
 		if (validationError) {
-			ctx.ui.notify(validationError, "warning");
+			notifyTerminal(ctx.ui, validationError, "warning");
 			return;
 		}
 		if (!this.runtime.activeGoal) {
-			ctx.ui.notify("没有活动目标。使用 /goal <目标> 开始一个。", "warning");
+			notifyTerminal(ctx.ui, "没有活动目标。使用 /goal <目标> 开始一个。", "warning");
 			return;
 		}
 
@@ -553,7 +573,7 @@ export class GoalCommandController {
 			try {
 				this.runtime.toolPolicy.prepareActivation(this.runtime.settings.toolVisibility, ctx);
 			} catch (error) {
-				ctx.ui.notify(`无法重新激活 /goal：${formatError(error)}`, "error");
+				notifyTerminal(ctx.ui, `无法重新激活 /goal：${formatError(error)}`, "error");
 				if (this.runtime.activeGoal?.status === "active") {
 					this.runtime.pauseGoalForUnavailableTools(ctx);
 				}
@@ -602,7 +622,7 @@ export class GoalCommandController {
 		} else {
 			this.runtime.clearStaleGoalToolCallBlock();
 		}
-		ctx.ui.notify(`目标已更新：${objective}`, "info");
+		notifyTerminal(ctx.ui, `目标已更新：${objective}`, "info");
 	}
 
 	showGoal(ctx: StatusContext) {
@@ -633,10 +653,10 @@ export class GoalCommandController {
 	private reportGoalStatus(ctx: StatusContext, message: string) {
 		if (ctx.mode === "print" || ctx.mode === "json") {
 			throw new Error(
-				`/goal status 在 ${ctx.mode} 模式下不可用，因为 Pi 不暴露扩展命令输出put channel. Use TUI or RPC mode.`,
+				`/goal status 在 ${ctx.mode} 模式下不可用，因为 Pi 不暴露扩展命令输出通道。请使用 TUI 或 RPC 模式。`,
 			);
 		}
-		ctx.ui.notify(message, "info");
+		notifyTerminal(ctx.ui, message, "info");
 	}
 
 	private async activatePrioritizedGoal(
@@ -659,7 +679,7 @@ export class GoalCommandController {
 		try {
 			this.runtime.toolPolicy.prepareActivation(this.runtime.settings.toolVisibility, ctx);
 		} catch (error) {
-			ctx.ui.notify(`无法优先处理 /goal：${formatError(error)}`, "error");
+			notifyTerminal(ctx.ui, `无法优先处理 /goal：${formatError(error)}`, "error");
 			if (currentGoal.status === "complete") {
 				// Completion already committed, so retain the priority intent for a
 				// later /reload after the tool policy is restored.
@@ -725,7 +745,7 @@ export class GoalCommandController {
 			this.runtime.toolPolicy.restore(visibilityBeforeActivation);
 			return false;
 		}
-		ctx.ui.notify(`目标已优先处理：${objective}`, "info");
+		notifyTerminal(ctx.ui, `目标已优先处理：${objective}`, "info");
 		return true;
 	}
 }

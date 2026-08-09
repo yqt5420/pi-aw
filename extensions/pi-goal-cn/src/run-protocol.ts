@@ -155,7 +155,7 @@ export class GoalRunController {
 
 	register(pi: ExtensionAPI) {
 		pi.events.on(GOAL_RUN_START_CHANNEL, (data) => {
-			// handleStart 是 async：吞掉未预期异常，避免未处理的 Promise 拒绝
+			// 防 run-start 未捕获拒绝：吞掉未预期异常，避免 unhandled rejection
 			this.handleStart(data).catch((error) => {
 				console.error(`[pi-goal] run start 处理异常：${formatError(error)}`);
 			});

@@ -1,1 +1,6 @@
-{ "pi": { "extensions": ["./src/index.ts"] } }
+{
+	"name": "pi-goal-cn",
+	"version": "0.49.7-cn.1",
+	"type": "module",
+	"pi": { "extensions": ["./src/index.ts"] }
+}

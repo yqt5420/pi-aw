@@ -1,6 +1,8 @@
 {
   "_meta": {
-    "note": "英文原句 -> 中文译句 映射表。translate.mjs 用其重放翻译。"
+    "note": "英文原句 -> 中文译句 映射表。translate.mjs 用其重放翻译。",
+    "upstream": "@narumitw/pi-goal",
+    "upstream_version": "0.49.7"
   },
   "mapping": {
     "Run a goal to completion: /goal [--tokens 100k] <goal_to_complete>": "运行目标直到完成：/goal [--tokens 100k] <要完成的目标>",
@@ -56,7 +58,7 @@
     "No active goal. Use /goal <objective> to start one.": "没有活动目标。使用 /goal <目标> 开始一个。",
     "Cannot reactivate /goal: ${formatError(error)}": "无法重新激活 /goal：${formatError(error)}",
     "Goal updated: ${objective}": "目标已更新：${objective}",
-    "/goal status is unavailable in ${ctx.mode} mode because Pi does not expose an extension-command output channel. Use TUI or RPC mode.": "/goal status 在 ${ctx.mode} 模式下不可用，因为 Pi 不暴露扩展命令输出put channel. Use TUI or RPC mode.",
+    "/goal status is unavailable in ${ctx.mode} mode because Pi does not expose an extension-command output channel. Use TUI or RPC mode.": "/goal status 在 ${ctx.mode} 模式下不可用，因为 Pi 不暴露扩展命令输出通道。请使用 TUI 或 RPC 模式。",
     "Cannot prioritize /goal: ${formatError(error)}": "无法优先处理 /goal：${formatError(error)}",
     "Goal prioritized: ${objective}": "目标已优先处理：${objective}",
     "Experimental ordered goals are enabled for pi-goal. Queue behavior and persisted state may change.": "已为 pi-goal 启用实验性有序目标。队列行为和持久化状态可能发生变化。",
@@ -182,7 +184,7 @@
     "Active elapsed: ${formatDuration(goal.timeUsedSeconds)}": "活动时长：${formatDuration(goal.timeUsedSeconds)}",
     "Safety pause: automatic-work limit reached (${goal.automaticModelTurns} of ${automaticTurnLimit ?? \"Unlimited\"} responses). Progress is saved; open /goal to review and continue.": "安全暂停：达到自动工作上限（${goal.automaticModelTurns} / ${automaticTurnLimit ?? \"无限制\"} 次响应）。进度已保存；打开 /goal 审查并继续。",
     "Safety pause: no progress. Progress is saved; open /goal to review and continue.": "安全暂停：无进展。进度已保存；打开 /goal 审查并继续。",
-    "Pending queue action: ${pendingAction.reason === \"complete\" ? \"complete\" : \"skip\"} current goal when Pi settles.": "待处理队列操作：${pendingAction.reason === \"complete\" ? \"complete\" : \"skip\"} 当前目标，当n Pi settles.",
+    "Pending queue action: ${pendingAction.reason === \"complete\" ? \"complete\" : \"skip\"} current goal when Pi settles.": "待处理队列操作：${pendingAction.reason === \"complete\" ? \"complete\" : \"skip\"} 当前目标，待 Pi 安定后执行。",
     "Queue is frozen. Re-enable experimental.goals and run /reload, or use /goal clear.": "队列已冻结。请重新启用 experimental.goals 并运行 /reload，或使用 /goal clear。",
     "Commands: /goal, /goal clear": "命令：/goal、/goal clear",
     "Edit pi-goal settings manually: ${safeTerminalText(settingsPath)}": "请手动编辑 pi-goal 设置：${safeTerminalText(settingsPath)}",
@@ -273,6 +275,14 @@
     "Goal updated": "目标已更新",
     "Goal dropped": "目标已丢弃",
     "Goal added": "目标已添加",
-    "`${existingGoal ? \"Goal replaced\" : \"Goal started\"}: ${objective}. ${\n\t\t\t\tstartedGoal.tokenBudget === undefined\n\t\t\t\t\t? \"\"\n\t\t\t\t\t: `Token budget: ${formatTokenCount(startedGoal.tokenBudget)} cumulative; the final model call may exceed it. `\n\t\t\t}${\n\t\t\t\tautomaticLimit === null\n\t\t\t\t\t? \"Automatic work is Unlimited; tool loops may consume substantial tokens and provider cost. Open /goal to monitor.\"\n\t\t\t\t\t: `Automatic work pauses after ${automaticLimit} responses; open /goal to monitor progress.`\n\t\t\t}`": "`${existingGoal ? \"目标已替换\" : \"目标已开始\"}：${objective}。${\n\t\t\t\tstartedGoal.tokenBudget === undefined\n\t\t\t\t\t? \"\"\n\t\t\t\t\t: `Token 预算：${formatTokenCount(startedGoal.tokenBudget)} 累计；最终模型调用可能超出。 `\n\t\t\t}${\n\t\t\t\tautomaticLimit === null\n\t\t\t\t\t? \"自动工作无限制；工具循环可能消耗大量 token 和提供商费用。打开 /goal 监控。\"\n\t\t\t\t\t: `自动工作将在 ${automaticLimit} 次响应后暂停；打开 /goal 监控进度。`\n\t\t\t}`"
+    "`${existingGoal ? \"Goal replaced\" : \"Goal started\"}: ${objective}. ${\n\t\t\t\tstartedGoal.tokenBudget === undefined\n\t\t\t\t\t? \"\"\n\t\t\t\t\t: `Token budget: ${formatTokenCount(startedGoal.tokenBudget)} cumulative; the final model call may exceed it. `\n\t\t\t}${\n\t\t\t\tautomaticLimit === null\n\t\t\t\t\t? \"Automatic work is Unlimited; tool loops may consume substantial tokens and provider cost. Open /goal to monitor.\"\n\t\t\t\t\t: `Automatic work pauses after ${automaticLimit} responses; open /goal to monitor progress.`\n\t\t\t}`": "`${existingGoal ? \"目标已替换\" : \"目标已开始\"}：${objective}。${\n\t\t\t\tstartedGoal.tokenBudget === undefined\n\t\t\t\t\t? \"\"\n\t\t\t\t\t: `Token 预算：${formatTokenCount(startedGoal.tokenBudget)} 累计；最终模型调用可能超出。 `\n\t\t\t}${\n\t\t\t\tautomaticLimit === null\n\t\t\t\t\t? \"自动工作无限制；工具循环可能消耗大量 token 和提供商费用。打开 /goal 监控。\"\n\t\t\t\t\t: `自动工作将在 ${automaticLimit} 次响应后暂停；打开 /goal 监控进度。`\n\t\t\t}`",
+    "Set a token budget before the updated goal": "在更新目标前设置 token 预算",
+    "Set a token budget before the queued goal": "在排队目标前设置 token 预算",
+    "Set the maximum cumulative token usage for this goal.": "设置此目标的最大累计 token 用量。",
+    "The final model call may exceed the limit; this is not a dollar-cost cap.": "最终模型调用可能超出该限制；这不是成本上限。",
+    "Enter the maximum cumulative token usage for this goal.": "输入此目标的最大累计 token 用量。",
+    "The final model call may exceed this value; this is not a dollar-cost cap.": "最终模型调用可能超出该值；这不是成本上限。",
+    "Automatic work has no response-count cap.": "自动工作无响应次数上限。",
+    "The goal will resume immediately.": "目标将立即恢复。"
   }
 }

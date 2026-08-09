@@ -3,6 +3,10 @@ import type { ActionMenuItem } from "@narumitw/pi-tui-kit";
 import { formatTokenCount as formatCompactTokenCount, formatDuration } from "./accounting.js";
 import { parseTokenBudget } from "./command.js";
 import type { GoalCommandController } from "./commands.js";
+import { notifyTerminal, safeGoalMenuText } from "./errors.js";
+
+export { safeGoalMenuText } from "./errors.js";
+
 import type { ActiveGoal, PendingQueueAction } from "./persistence.js";
 import { goalQueueIdentity } from "./queue.js";
 import { type GoalRuntime, goalSummary } from "./runtime.js";
@@ -389,7 +393,8 @@ export async function showGoalManager(
 			"start-with-custom-budget": async ({ value, signal }) => {
 				const budget = parseTokenBudget(value ?? "");
 				if (budget === undefined) {
-					ctx.ui.notify(
+					notifyTerminal(
+						ctx.ui,
 						"请输入正 token 数量，例如 25k、300k 或 1.5m。",
 						"warning",
 					);
@@ -411,7 +416,8 @@ export async function showGoalManager(
 				const goal = displayedBudgetGoal;
 				const budget = parseTokenBudget(value ?? "");
 				if (budget === undefined) {
-					ctx.ui.notify(
+					notifyTerminal(
+						ctx.ui,
 						"请输入正 token 数量，例如 300k、1.5m 或 300000。",
 						"warning",
 					);
@@ -431,7 +437,8 @@ export async function showGoalManager(
 					return { kind: "close" };
 				}
 				if (budget <= goal.tokensUsed) {
-					ctx.ui.notify(
+					notifyTerminal(
+						ctx.ui,
 						`请输入大于当前用量（${formatCompactTokenCount(goal.tokensUsed)}）的新的累计总数。`,
 						"warning",
 					);
@@ -515,7 +522,8 @@ export async function showGoalManager(
 					goalQueueIdentity(runtime.activeGoal, runtime.queuedGoals, runtime.pendingQueueAction) !==
 					previewedQueue
 				) {
-					ctx.ui.notify(
+					notifyTerminal(
+						ctx.ui,
 						"打开对话框期间目标队列已更改。请重新打开 /goal 再试一次。",
 						"warning",
 					);
@@ -618,18 +626,6 @@ function refreshGoalMenuState(runtime: GoalMenuRuntimeView, ctx: ExtensionComman
 	runtime.updateStatus?.(ctx, goal);
 }
 
-export function safeGoalMenuText(value: string, maxCharacters = 120) {
-	const sanitized = [...value]
-		.map((character) => (isTerminalControl(character) ? " " : character))
-		.join("")
-		.replace(/\s+/gu, " ")
-		.trim();
-	const characters = [...sanitized];
-	return characters.length <= maxCharacters
-		? sanitized
-		: `${characters.slice(0, maxCharacters).join("")}…`;
-}
-
 async function startFromMenu(commands: GoalCommandController, ctx: ExtensionCommandContext) {
 	const objective = (await ctx.ui.editor("目标目标", ""))?.trim();
 	if (!objective) return;
@@ -674,24 +670,24 @@ async function startBudgetedGoal(
 
 function tokenBudgetGuidance(automaticLimit: number | null) {
 	return [
-		"Set the maximum cumulative token usage for this goal.",
-		"The final model call may exceed the limit; this is not a dollar-cost cap.",
+		"设置此目标的最大累计 token 用量。",
+		"最终模型调用可能超出该限制；这不是成本上限。",
 		automaticBudgetGuidance(automaticLimit),
 	];
 }
 
 function customTokenBudgetGuidance(automaticLimit: number | null) {
 	return [
-		"Enter the maximum cumulative token usage for this goal.",
+		"输入此目标的最大累计 token 用量。",
 		"Examples: 25k, 300k, 1.5m, or 300000.",
-		"The final model call may exceed this value; this is not a dollar-cost cap.",
+		"最终模型调用可能超出该值；这不是成本上限。",
 		automaticBudgetGuidance(automaticLimit),
 	];
 }
 
 function automaticBudgetGuidance(automaticLimit: number | null) {
 	return automaticLimit === null
-		? "Automatic work has no response-count cap."
+		? "自动工作无响应次数上限。"
 		: `自动工作也将在 ${automaticLimit} 次响应后暂停。`;
 }
 
@@ -701,7 +697,7 @@ function increaseTokenBudgetGuidance(goal: ActiveGoal, automaticLimit: number | 
 		`当前用量：${formatBudgetDecisionValue(goal.tokensUsed)}`,
 		`请输入大于 ${formatBudgetDecisionValue(goal.tokensUsed)} 的新的累计总数。`,
 		"Examples: 300k, 1.5m, or 300000.",
-		"The final model call may exceed the limit; this is not a dollar-cost cap.",
+		"最终模型调用可能超出该限制；这不是成本上限。",
 		automaticBudgetGuidance(automaticLimit),
 	];
 }
@@ -730,7 +726,7 @@ function increaseBudgetPreview(goal: ActiveGoal, budget: number, automaticLimit:
 		automaticLimit === null
 			? "Automatic work: 无限制 after resume"
 			: `自动工作：恢复后最多 ${automaticLimit} 次更多响应`,
-		"The goal will resume immediately.",
+		"目标将立即恢复。",
 	].join("\n");
 }
 
@@ -787,7 +783,8 @@ function requireCurrentStartBudgetQueue(
 	if (currentGoalQueueIdentity(runtime) === expectedIdentity) {
 		return true;
 	}
-	ctx.ui.notify(
+	notifyTerminal(
+		ctx.ui,
 		"打开 token 预算流程期间目标队列已更改。请重新打开 /goal 再试一次。",
 		"warning",
 	);
@@ -811,7 +808,8 @@ function requireCurrentBudgetPreview(
 	) {
 		return true;
 	}
-	ctx.ui.notify(
+	notifyTerminal(
+		ctx.ui,
 		"打开预算对话框期间目标或其用量已更改。请重新打开 /goal 再试一次。",
 		"warning",
 	);
@@ -824,7 +822,8 @@ function requireCurrentQueueHead(
 	ctx: ExtensionCommandContext,
 ) {
 	if (runtime.activeGoal?.id === expectedGoal.id) return true;
-	ctx.ui.notify(
+	notifyTerminal(
+		ctx.ui,
 		"打开对话框期间目标队列已更改。请重新打开 /goal 再试一次。",
 		"warning",
 	);
@@ -848,7 +847,8 @@ function requireCurrentQueueSelection(
 	) {
 		return true;
 	}
-	ctx.ui.notify(
+	notifyTerminal(
+		ctx.ui,
 		"打开对话框期间目标队列已更改。请重新打开 /goal 再试一次。",
 		"warning",
 	);
@@ -861,7 +861,8 @@ function requireCurrentMenuGoal(
 	ctx: ExtensionCommandContext,
 ) {
 	if (runtime.activeGoal?.id === expected.id) return true;
-	ctx.ui.notify(
+	notifyTerminal(
+		ctx.ui,
 		"打开对话框期间活动目标已更改。请重新打开 /goal 再试一次。",
 		"warning",
 	);
@@ -891,11 +892,6 @@ function automaticPauseSummary(used: number, limit: number | null) {
 		return `目标在其之前的安全限制下于 ${used} 次响应后暂停。当前自动工作限制：${limit}。`;
 	}
 	return `目标已达到其 ${used}/${limit} 安全限制。`;
-}
-
-function isTerminalControl(character: string) {
-	const codePoint = character.codePointAt(0) ?? 0;
-	return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
 }
 
 function goalHelp() {

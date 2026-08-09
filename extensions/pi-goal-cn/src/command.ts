@@ -79,8 +79,8 @@ export function completeGoalArguments(
 						label: "--tokens",
 						description:
 							command === "edit"
-								? "Set a token budget before the updated goal"
-								: "Set a token budget before the queued goal",
+								? "在更新目标前设置 token 预算"
+								: "在排队目标前设置 token 预算",
 					},
 				]
 			: null;

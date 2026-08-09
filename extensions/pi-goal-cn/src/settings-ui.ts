@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { type ExtensionCommandContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { checkpointGoalActiveTime } from "./accounting.js";
+import { notifyTerminal, safeTerminalText } from "./errors.js";
 import { abortCurrentTurn, type GoalRuntime, STATUS_KEY } from "./runtime.js";
 import {
 	DEFAULT_GOAL_SETTINGS,
@@ -29,7 +30,11 @@ export async function showGoalSettings(
 ) {
 	const settingsPath = options.settingsPath ?? join(getAgentDir(), GOAL_SETTINGS_FILE);
 	if (ctx.mode !== "tui") {
-		ctx.ui.notify(`请手动编辑 pi-goal 设置：${safeTerminalText(settingsPath)}`, "info");
+		notifyTerminal(
+			ctx.ui,
+			`请手动编辑 pi-goal 设置：${safeTerminalText(settingsPath)}`,
+			"info",
+		);
 		return;
 	}
 	const generation = runtime.menuGeneration;
@@ -159,7 +164,7 @@ export async function showGoalSettings(
 					applyGoalSettings(runtime, next, ctx, {
 						save: (settings) => (options.save ?? saveGoalSettings)(settings, settingsPath),
 					});
-					ctx.ui.notify(`目标工具：${value}。`, "info");
+					notifyTerminal(ctx.ui, `目标工具：${value}。`, "info");
 					return { kind: "stay" };
 				} catch (error) {
 					notifySettingsFailure(ctx, settingsPath, error);
@@ -180,13 +185,18 @@ export async function showGoalSettings(
 						try {
 							await options.onQueueUnfrozen?.(ctx);
 						} catch (error) {
-							ctx.ui.notify(
+							notifyTerminal(
+								ctx.ui,
 								`目标队列已启用，但自动恢复失败：${safeTerminalText(formatError(error))}。请重新打开 /goal 重试。`,
 								"warning",
 							);
 						}
 					}
-					ctx.ui.notify(`有序目标队列：${enabled ? "实验" : "关闭"}。`, "info");
+					notifyTerminal(
+						ctx.ui,
+						`有序目标队列：${enabled ? "实验" : "关闭"}。`,
+						"info",
+					);
 					return { kind: "stay" };
 				} catch (error) {
 					notifySettingsFailure(ctx, settingsPath, error);
@@ -204,7 +214,7 @@ export async function showGoalSettings(
 					applyGoalSettings(runtime, next, ctx, {
 						save: (settings) => (options.save ?? saveGoalSettings)(settings, settingsPath),
 					});
-					ctx.ui.notify(`受管运行 RPC：${enabled ? "开启" : "关闭"}。`, "info");
+					notifyTerminal(ctx.ui, `受管运行 RPC：${enabled ? "开启" : "关闭"}。`, "info");
 					return { kind: "stay" };
 				} catch (error) {
 					notifySettingsFailure(ctx, settingsPath, error);
@@ -310,7 +320,8 @@ async function applyLimitChoice(
 ) {
 	if (!isCurrent() || !isLimitSelection(itemId)) return { kind: "rejected" as const };
 	if ((runtime.activeGoal?.id ?? null) !== activeGoalId) {
-		ctx.ui.notify(
+		notifyTerminal(
+			ctx.ui,
 			"打开安全设置期间活动目标已更改。未更改任何设置。",
 			"warning",
 		);
@@ -321,7 +332,8 @@ async function applyLimitChoice(
 	if (!isCurrent()) return { kind: "rejected" as const };
 	if (limit === undefined || limit === previous) return { kind: "back" as const };
 	if ((runtime.activeGoal?.id ?? null) !== activeGoalId) {
-		ctx.ui.notify(
+		notifyTerminal(
+			ctx.ui,
 			"编辑安全设置期间活动目标已更改。未更改任何设置。",
 			"warning",
 		);
@@ -330,7 +342,8 @@ async function applyLimitChoice(
 	const confirmation = await confirmLowerActiveLimit(runtime, ctx, field, limit);
 	if (!isCurrent() || !confirmation.apply) return { kind: "rejected" as const };
 	if (confirmation.goalId !== undefined && runtime.activeGoal?.id !== confirmation.goalId) {
-		ctx.ui.notify(
+		notifyTerminal(
+			ctx.ui,
 			"确认上限期间活动目标已更改。未更改任何设置。",
 			"warning",
 		);
@@ -340,7 +353,7 @@ async function applyLimitChoice(
 		applyGoalSettings(runtime, withLimit(runtime.settings, field, limit), ctx, {
 			save: (settings) => (options.save ?? saveGoalSettings)(settings, settingsPath),
 		});
-		ctx.ui.notify(formatLimitSuccess(field, limit), "info");
+		notifyTerminal(ctx.ui, formatLimitSuccess(field, limit), "info");
 		return { kind: "back" as const };
 	} catch (error) {
 		notifySettingsFailure(ctx, settingsPath, error);
@@ -442,7 +455,8 @@ async function resolveLimitSelection(
 		if (!isCurrent() || raw === undefined) return undefined;
 		const parsed = parseGoalLimit(raw);
 		if (parsed !== undefined) return parsed;
-		ctx.ui.notify(
+		notifyTerminal(
+			ctx.ui,
 			`请输入大于 0 的整数。如果不需要上限，请在上一个屏幕选择 ${field === "automaticTurns" ? "无限制" : "关闭"}。`,
 			"warning",
 		);
@@ -607,22 +621,13 @@ function retainedGoalCount(runtime: GoalRuntime) {
 function notifySettingsFailure(ctx: ExtensionCommandContext, settingsPath: string, error: unknown) {
 	const path = safeTerminalText(settingsPath);
 	const detail = safeTerminalText(formatError(error));
-	ctx.ui.notify(
+	notifyTerminal(
+		ctx.ui,
 		error instanceof AggregateError
 			? `无法应用目标设置，且回滚不完整。请检查 ${path}，运行 /reload，并在重试前验证生效设置：${detail}`
 			: `无法保存目标设置；保留原值。请检查 ${path} 并重试：${detail}`,
 		"error",
 	);
-}
-
-function safeTerminalText(value: string) {
-	return [...value]
-		.map((character) => {
-			const codePoint = character.codePointAt(0) ?? 0;
-			return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) ? " " : character;
-		})
-		.join("")
-		.trim();
 }
 
 function formatError(error: unknown) {

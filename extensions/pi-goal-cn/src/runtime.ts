@@ -6,7 +6,7 @@ import {
 	formatTokenCount,
 	updateGoalUsage,
 } from "./accounting.js";
-import { formatError, truncateNotification } from "./errors.js";
+import { formatError, notifyTerminal, truncateNotification } from "./errors.js";
 import {
 	appendGoalPromptMarker,
 	extractContinuationMarker,
@@ -111,6 +111,7 @@ export interface StatusContext {
 
 export const STATUS_KEY = "goal";
 export const GOAL_STATE_ENTRY_TYPE = "goal-state";
+export const MAX_GOAL_ID_LENGTH = 128;
 
 /** Canonical Goal state passed to the in-process managed-run publisher. */
 export type GoalStateSnapshotStatus = GoalStatus | "cleared";
@@ -204,6 +205,7 @@ export class GoalRuntime {
 	queueFrozen = false;
 	queueFreezeAwaitingSettle = false;
 	completionStatusTimer?: NodeJS.Timeout;
+	private continuationDispatchTimer?: NodeJS.Timeout;
 	continuationIntent?: ContinuationTicket;
 	continuationDelivery?: ContinuationTicket;
 	goalRecovery?: GoalRecovery;
@@ -361,6 +363,7 @@ export class GoalRuntime {
 		}
 		if (ctx.isIdle?.() !== true || hasPendingMessages(ctx)) return false;
 
+		this.clearContinuationDispatchTimer();
 		this.continuationIntent = undefined;
 		this.continuationDelivery = intent;
 		try {
@@ -373,7 +376,7 @@ export class GoalRuntime {
 			if (this.activeGoal?.id === intent.goalId && this.activeGoal.status === "active") {
 				this.continuationIntent = intent;
 			}
-			ctx.ui.notify(`目标提示词失败：${formatError(error)}`, "error");
+			notifyTerminal(ctx.ui, `目标提示词失败：${formatError(error)}`, "error");
 			return false;
 		}
 	}
@@ -559,7 +562,7 @@ export class GoalRuntime {
 			return true;
 		} catch (error) {
 			this.budgetWrapUp.delivered = false;
-			ctx.ui.notify(`目标预算收尾失败：${formatError(error)}`, "error");
+			notifyTerminal(ctx.ui, `目标预算收尾失败：${formatError(error)}`, "error");
 			return false;
 		}
 	}
@@ -580,7 +583,7 @@ export class GoalRuntime {
 			reason: `token budget reached (${formatBudget(goal)})`,
 		});
 		if (!stoppedGoal) return false;
-		ctx.ui.notify(`目标 token 预算已用完：${formatBudget(stoppedGoal)}`, "warning");
+		notifyTerminal(ctx.ui, `目标 token 预算已用完：${formatBudget(stoppedGoal)}`, "warning");
 		if (sendWrapUp) this.queueBudgetWrapUp(ctx, stoppedGoal);
 		return true;
 	}
@@ -652,7 +655,8 @@ export class GoalRuntime {
 			reason: `${cause} (${count}; ${formatTokenCount(goal.tokensUsed)} tokens)`,
 		});
 		if (!stoppedGoal) return false;
-		ctx.ui.notify(
+		notifyTerminal(
+			ctx.ui,
 			cause === "continuation_limit"
 				? `达到自动工作上限：${stoppedGoal.automaticModelTurns} / ${automaticLimit} 次响应。目标进度已保存，累计 ${formatTokenCount(stoppedGoal.tokensUsed)} 个 token。打开 /goal 审查并继续。`
 				: `目标已暂停：${count}；累计 ${formatTokenCount(stoppedGoal.tokensUsed)} 个 token。打开 /goal 审查并继续。`,
@@ -684,7 +688,8 @@ export class GoalRuntime {
 			reason: `agent error after retries${details}`,
 		});
 		if (!stoppedGoal) return false;
-		ctx.ui.notify(
+		notifyTerminal(
+			ctx.ui,
 			`代理错误重试用尽后目标被阻止${details}。请解决阻塞问题或运行 /goal resume 重试。`,
 			"warning",
 		);
@@ -714,6 +719,7 @@ export class GoalRuntime {
 	}
 
 	clearContinuationTracking() {
+		this.clearContinuationDispatchTimer();
 		this.continuationIntent = undefined;
 		this.continuationDelivery = undefined;
 		this.cancelledContinuationMarkers.clear();
@@ -743,11 +749,34 @@ export class GoalRuntime {
 	}
 
 	cancelContinuationWork() {
+		this.clearContinuationDispatchTimer();
 		if (this.continuationDelivery) {
 			this.rememberCancelledContinuationMarker(this.continuationDelivery.marker);
 		}
 		this.continuationIntent = undefined;
 		this.continuationDelivery = undefined;
+	}
+
+	scheduleContinuationDispatch(ctx: StatusContext, goalId: string) {
+		this.clearContinuationDispatchTimer();
+		const generation = this.menuGeneration;
+		this.continuationDispatchTimer = setTimeout(() => {
+			this.continuationDispatchTimer = undefined;
+			if (
+				generation !== this.menuGeneration ||
+				this.activeGoal?.id !== goalId ||
+				this.activeGoal.status !== "active"
+			) {
+				return;
+			}
+			this.dispatchContinuationIfSettled(ctx);
+		}, 0);
+	}
+
+	private clearContinuationDispatchTimer() {
+		if (!this.continuationDispatchTimer) return;
+		clearTimeout(this.continuationDispatchTimer);
+		this.continuationDispatchTimer = undefined;
 	}
 
 	consumeCancelledContinuationPrompt(prompt: string) {
@@ -959,7 +988,8 @@ export class GoalRuntime {
 			recordUsage,
 		});
 		if (!stoppedGoal) return false;
-		ctx.ui.notify(
+		notifyTerminal(
+			ctx.ui,
 			"目标工具不可用，因此活动目标已暂停。请恢复工具并运行 /goal resume。",
 			"warning",
 		);
@@ -1150,7 +1180,7 @@ export function goalSummary(
 	}
 	if (pendingAction?.kind === "advance") {
 		summary.push(
-			`待处理队列操作：${pendingAction.reason === "complete" ? "complete" : "skip"} 当前目标，当n Pi settles.`,
+			`待处理队列操作：${pendingAction.reason === "complete" ? "complete" : "skip"} 当前目标，待 Pi 安定后执行。`,
 		);
 	}
 	if (queueFrozen) {
@@ -1196,6 +1226,7 @@ export function isContradictoryCompletionSummary(summary: string) {
 
 export function goalIdRejectionReason(goal: ActiveGoal, requestedGoalId: string) {
 	if (!requestedGoalId) return "missing goal_id";
+	if (requestedGoalId.length > MAX_GOAL_ID_LENGTH) return "goal_id is too long";
 	if (requestedGoalId !== goal.id) return "goal_id does not match the active goal";
 	return undefined;
 }
@@ -1215,7 +1246,7 @@ async function sendPrompt(
 		return true;
 	} catch (error) {
 		if (!isCurrent || isCurrent()) {
-			ctx.ui.notify(`目标提示词失败：${formatError(error)}`, "error");
+			notifyTerminal(ctx.ui, `目标提示词失败：${formatError(error)}`, "error");
 		}
 		return false;
 	}
