@@ -281,13 +281,24 @@ interface ScanInput {
   ) => Promise<{ apiKey?: string; headers?: Record<string, string> } | undefined>;
   signal?: AbortSignal | null;
   onProgress?: (msg: string) => void;
+  /** true=强制绕过 24h 缓存，重新实测（/vision-scan 手动扫描） */
+  force?: boolean;
 }
 
 /** 模块级扫描互斥（防定时器与手动扫描并发） */
 let scanInFlight: Promise<State> | null = null;
 
 async function scanAndMaintain(input: ScanInput): Promise<State> {
-  // 单飞：已有扫描在跑则复用其 Promise
+  // 单飞：已有扫描在跑则复用其 Promise。
+  // 修复：若本次是强制扫描（force）而正在跑的是一轮普通扫描（可能读缓存、不会重测），
+  // 直接复用其 Promise 会导致"强制重测"被普通扫描顶掉而失效——这里先等它收尾后的下一轮强制扫描。
+  if (scanInFlight && input.force) {
+    try {
+      await scanInFlight;
+    } catch {
+      // 上一轮扫描的错误不影响本次强制扫描
+    }
+  }
   if (scanInFlight) return scanInFlight;
   scanInFlight = (async () => {
     const prev = readState();
@@ -319,7 +330,11 @@ async function scanAndMaintain(input: ScanInput): Promise<State> {
         });
         continue;
       }
-      if (cached && cached.lastTested && now - cached.lastTested < CACHE_MAX_AGE_MS) {
+      // 手动扫描（force）忽略 24h 缓存，强制重新实测（修复：force 未贯穿导致 /vision-scan 复用旧判定）
+      if (
+        !input.force &&
+        cached && cached.lastTested && now - cached.lastTested < CACHE_MAX_AGE_MS
+      ) {
         // 防御未来时间戳
         if (cached.lastTested <= now + 5 * 60 * 1000) {
           staticResults.push(cached);
@@ -671,6 +686,7 @@ export default function (pi: ExtensionAPI) {
         },
         signal: ctx.signal,
         onProgress: notify,
+        force: opts.force ?? false,
       });
     } catch (err) {
       console.error(`[vision-router] 扫描失败: ${err instanceof Error ? err.message : String(err)}`);
