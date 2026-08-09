@@ -237,6 +237,10 @@ export function registerStatefulSubagents(
 				retentionDays: settings.retentionDays,
 				maxStoredAgents: settings.maxStoredAgents,
 			});
+			// 顺带清一次历史孤儿空存档（不会阻塞会话启动）。见 AgentPersistence.cleanupOrphans。
+			void AgentPersistence.cleanupOrphans({
+				retentionDays: settings.retentionDays,
+			}).catch(() => {});
 			const sessionBroker = new CompletionDeliveryBroker(pi, ctx, completionDelivery, {
 				onDeliveryError: (error) => {
 					if (!ctx.hasUI) return;

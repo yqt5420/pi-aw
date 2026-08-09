@@ -8,6 +8,8 @@ import type { ManagedAgent } from "./registry.js";
 
 const STATE_VERSION = 2;
 const MAX_STATE_BYTES = 1024 * 1024;
+/** 状态文件名形如 <sha256前24位hex>.json */
+const OWNER_FILE_RE = /^[0-9a-f]{24}\.json$/;
 
 interface StoredState {
 	version: 2;
@@ -89,6 +91,58 @@ export class AgentPersistence {
 		await withFileMutationQueue(this.filePath, async () => {
 			await fs.promises.rm(this.filePath, { force: true });
 		});
+	}
+
+	/**
+	 * 清扫孤儿存档：删除「早于保留期 且 内容为空(agents=[])」的状态文件。
+	 *
+	 * 背景：会话被删除后，pi 不提供「会话已删除」事件，插件无法在会话删除时顺手
+	 * 删文件，因此会积累一批空壳 .json。这里在每次会话启动时扫一次目录，把 "已过期且
+	 * 无留住物"（agents 为空数组）的文件回收，避免无限制堆积。
+	 *
+	 * 安全边界：只删匹配 <24位hex>.json 命名（owner 哈希）的文件，且必须同时满足
+	 *   1) 修改时间早于 retentionMs（过期）
+	 *   2) 内容为合法状态且 agents 为空数组（无实际子代理需要保留）
+	 * 不匹配即跳过，绝不动其它文件。
+	 *
+	 * @param options.stateDir 扫描目录（默认与实例相同的 pi-subagents-state）。
+	 * @param options.retentionDays 空文件的保留天数（默认 30）。
+	 * @returns 删除的文件数。
+	 */
+	static async cleanupOrphans(
+		options: PersistenceOptions = {},
+	): Promise<number> {
+		const retentionDays = options.retentionDays ?? 30;
+		if (!Number.isFinite(retentionDays) || retentionDays <= 0) return 0;
+		const retentionMs = retentionDays * 24 * 60 * 60 * 1000;
+		const stateDir = options.stateDir ?? path.join(getAgentDir(), "pi-subagents-state");
+		let entries: fs.Dirent[];
+		try {
+			entries = await fs.promises.readdir(stateDir, { withFileTypes: true });
+		} catch {
+			// 目录不存在 → 没有孤儿可清，静默返回。
+			return 0;
+		}
+		const cutoff = Date.now() - retentionMs;
+		let removed = 0;
+		for (const entry of entries) {
+			if (!entry.isFile() || !OWNER_FILE_RE.test(entry.name)) continue;
+			const file = path.join(stateDir, entry.name);
+			try {
+				const stat = await fs.promises.stat(file);
+				if (stat.mtimeMs >= cutoff) continue; // 过期才算孤儿
+				const parsed = JSON.parse(
+					await fs.promises.readFile(file, "utf8"),
+				) as { agents?: unknown };
+				// 只有 "空壳"（agents 为空数组）才回收；带子代理的不动。
+				if (!Array.isArray(parsed.agents) || parsed.agents.length !== 0) continue;
+				await fs.promises.rm(file, { force: true });
+				removed++;
+			} catch {
+				// 单个文件读取/解析失败不阻断整个清扫（可能是并发写的中间态），跳过。
+			}
+		}
+		return removed;
 	}
 
 	private quarantine(): void {
