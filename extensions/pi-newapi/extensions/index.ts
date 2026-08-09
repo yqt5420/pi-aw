@@ -35,7 +35,8 @@ import { lookupBuiltin, type BuiltinMeta } from "./builtin.ts";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { writeJsonAtomic } from "./atomic-write.ts";
 
 const PROVIDER_ID = "newapi";
 
@@ -74,16 +75,18 @@ function readConfigFile(): NewApiConfig | undefined {
   return _cfg;
 }
 
-/** Write the config file (merges with existing fields) and refresh the in-memory cache. */
-function writeConfigFile(patch: NewApiConfig): void {
-  mkdirSync(agentDir(), { recursive: true });
+/**
+ * Write the config file (merges with existing fields) and refresh the in-memory cache.
+ * @returns 是否持久化成功（false 表示目标被占用/写失败，未落地磁盘）。
+ */
+async function writeConfigFile(patch: NewApiConfig): Promise<boolean> {
   const merged = { ...(readConfigFile() ?? {}), ...patch };
-  // 原子写：tmp + rename，避免进程中断留下半截 JSON
-  const tmpPath = `${CONFIG_PATH}.tmp.${process.pid}.${Date.now()}`;
-  writeFileSync(tmpPath, JSON.stringify(merged, null, 2) + "\n", "utf-8");
-  renameSync(tmpPath, CONFIG_PATH);
-  _cfg = merged;
-  _cfgLoaded = true;
+  if (await writeJsonAtomic(CONFIG_PATH, merged, true)) {
+    _cfg = merged;
+    _cfgLoaded = true;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -150,16 +153,8 @@ function readCache(): CachedCatalog | undefined {
   return undefined;
 }
 
-function writeCache(c: CachedCatalog): void {
-  try {
-    mkdirSync(agentDir(), { recursive: true });
-    // 原子写：tmp + rename，避免进程中断留下半截缓存
-    const tmpPath = `${CACHE_PATH}.tmp.${process.pid}.${Date.now()}`;
-    writeFileSync(tmpPath, JSON.stringify(c, null, 2), "utf-8");
-    renameSync(tmpPath, CACHE_PATH);
-  } catch {
-    /* non-fatal */
-  }
+async function writeCache(c: CachedCatalog): Promise<void> {
+  await writeJsonAtomic(CACHE_PATH, c, false);
 }
 
 /** Name patterns for non-chat models we should not register (image / audio / embedding generators). */
@@ -256,7 +251,7 @@ async function fetchCatalog(
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = (await res.json()) as NewApiPricingResponse;
     const groupRatio = pickGroupRatio(payload);
-    writeCache({
+    await writeCache({
       baseUrl,
       fetchedAt: Date.now(),
       groupRatio,
@@ -344,13 +339,17 @@ function buildModels(
  * 与 ModelConfigSchema 兼容）。这样 pi / 任何读 models.json 的终端/web 都能拿到
  * 一份稳定、可区分、思考强度正确的模型清单，而不是每次依赖插件动态发现的原始名。
  * 该文件由插件自动维护：每次启动（有缓存）与每次刷新目录后都会重写。
+ *
+ * 注意：此文件是 pi 原生共享配置，仅作模型发现用；明文的 apiKey 不写入其中，
+ * 只保留在私有的 newapi-config.json（运行时鉴权走 $NEWAPI_API_KEY env，见 resolveApiKey）。
+ *
+ * @returns 是否持久化成功。
  */
-function writeModelsJson(
+async function writeModelsJson(
   models: ReturnType<typeof buildModelConfig>[],
   baseUrl: string,
-  apiKey: string | undefined,
-): void {
-  if (!models.length) return;
+): Promise<boolean> {
+  if (!models.length) return false;
   const providerModels = models.map((m) => ({
     id: m.id,
     name: m.name,
@@ -369,20 +368,12 @@ function writeModelsJson(
         baseUrl,
         api: "openai-completions",
         authHeader: true,
-        ...(apiKey ? { apiKey } : {}),
         models: providerModels,
       },
     },
   };
-  try {
-    mkdirSync(agentDir(), { recursive: true });
-    // 原子写：tmp + rename，避免进程中断留下半截 JSON。
-    const tmpPath = `${MODELS_JSON_PATH}.tmp.${process.pid}.${Date.now()}`;
-    writeFileSync(tmpPath, JSON.stringify(payload, null, 2) + "\n", "utf-8");
-    renameSync(tmpPath, MODELS_JSON_PATH);
-  } catch {
-    /* 写 models.json 失败不影响模型发现本身 */
-  }
+  // 原子写（写失败自动清理临时文件，不留孤儿）。写不进去也不影响模型发现本身。
+  return writeJsonAtomic(MODELS_JSON_PATH, payload, true);
 }
 
 /**
@@ -412,7 +403,11 @@ export default async function (pi: ExtensionAPI) {
         ctx.ui.notify(`newapi：地址无效 — ${result.error}`, "error");
         return;
       }
-      writeConfigFile({ baseUrl: result.url });
+      const saved = await writeConfigFile({ baseUrl: result.url });
+      if (!saved) {
+        ctx.ui.notify("newapi：地址保存失败（文件可能被占用）— 请稍后重试", "error");
+        return;
+      }
       const note = result.appended
         ? `newapi：已规范化为 ${result.url}（自动补 /v1），重新加载…`
         : `newapi：地址已设为 ${result.url}，重新加载…`;
@@ -476,7 +471,9 @@ export default async function (pi: ExtensionAPI) {
 
   pi.registerProvider(PROVIDER_ID, providerConfig());
   // 启动不等待网络：先把缓存整理出的清单同步维护进 models.json（若已有模型）。
-  if (models.length) writeModelsJson(models, baseUrl, apiKey);
+  // 单写者：只由本扩展负责维护 models.json；其它 pi 进程即使也在写，也会先写各自 tmp 再
+  // rename，最坏结果是「后覆盖先」，而不会写坏文件（见 atomic-write.ts）。
+  if (models.length) void writeModelsJson(models, baseUrl);
 
   // 共享的刷新逻辑：拉取目录 → 用最新结果替换注册，并同步维护 models.json。启动与 /newapi-refresh 都复用它。
   const refreshCatalog = async (): Promise<void> => {
@@ -486,7 +483,7 @@ export default async function (pi: ExtensionAPI) {
         modelSource.clear();
         models = buildModels(catalog.entries, catalog.groupRatio, modelSource);
         pi.registerProvider(PROVIDER_ID, providerConfig());
-        writeModelsJson(models, baseUrl, apiKey);
+        await writeModelsJson(models, baseUrl);
       }
     } catch (err) {
       fetchError = err instanceof Error ? err.message : String(err);
@@ -553,8 +550,13 @@ export default async function (pi: ExtensionAPI) {
         ctx.ui.notify("newapi：暂无模型 — 请先用 /newapi-refresh 成功拉取后再试", "warning");
         return;
       }
-      writeModelsJson(models, baseUrl, apiKey);
-      ctx.ui.notify(`newapi：已写入 models.json，共 ${models.length} 个模型`, "info");
+      const ok = await writeModelsJson(models, baseUrl);
+      ctx.ui.notify(
+        ok
+          ? `newapi：已写入 models.json，共 ${models.length} 个模型`
+          : "newapi：写入 models.json 失败（文件可能被占用）",
+        ok ? "info" : "error",
+      );
     },
   });
 
